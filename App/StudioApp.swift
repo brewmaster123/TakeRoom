@@ -78,6 +78,33 @@ private enum Page: String, CaseIterable { case write = "Текст", record = "�
 private enum Delivery: Equatable { case preview, shareMovie, photos, stems }
 private struct OutputFile: Identifiable { let id = UUID(); let url: URL }
 
+private struct BeatPicker: UIViewControllerRepresentable {
+    let finish: (URL?) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(finish: finish) }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: true)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ picker: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let finish: (URL?) -> Void
+        init(finish: @escaping (URL?) -> Void) { self.finish = finish }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            finish(urls.first)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            finish(nil)
+        }
+    }
+}
+
 struct Editor: View {
     @Binding var song: Song
     let folder: URL
@@ -86,6 +113,7 @@ struct Editor: View {
     @State private var section = Page.write
     @State private var looping = true
     @State private var importer = false
+    @State private var pickedBeat: URL?
     @State private var sound = false
     @State private var pass: Pass?
     @State private var busy: String?
@@ -127,11 +155,14 @@ struct Editor: View {
                 }
             }
         }
-        .fileImporter(isPresented: $importer, allowedContentTypes: [.audio]) { result in
-            switch result {
-            case .failure(let e):
-                if (e as NSError).code != NSUserCancelledError { error = e.localizedDescription }
-            case .success(let url): Task { await importBeat(url) }
+        .sheet(isPresented: $importer, onDismiss: {
+            guard let url = pickedBeat else { return }
+            pickedBeat = nil
+            Task { await importBeat(url) }
+        }) {
+            BeatPicker { url in
+                pickedBeat = url
+                importer = false
             }
         }
         .sheet(isPresented: $sound) { SoundSettings() }
@@ -260,7 +291,7 @@ struct Editor: View {
         do {
             song.beat = try await Self.copyBeat(url, folder: folder)
             song.start = 0
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = "Не удалось импортировать «\(url.lastPathComponent)». \(error.localizedDescription)" }
     }
     nonisolated private static func copyBeat(_ source: URL, folder: URL) async throws -> Beat {
         let access = source.startAccessingSecurityScopedResource()
