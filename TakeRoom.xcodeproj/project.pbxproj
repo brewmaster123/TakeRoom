@@ -1,0 +1,41 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		D693BC72490359F3E88AD8DC = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Camera.swift"; sourceTree = "<group>"; };
+		F00778D418FBC00FFF1EC008 = {isa = PBXBuildFile; fileRef = D693BC72490359F3E88AD8DC; };
+		724E28959E11486CCBB855E3 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Project.swift"; sourceTree = "<group>"; };
+		4EBA032557594F512A17AB78 = {isa = PBXBuildFile; fileRef = 724E28959E11486CCBB855E3; };
+		D37917814E7FCE2242F16561 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Recorder.swift"; sourceTree = "<group>"; };
+		0B8CDE011E8F4DD1FA91B424 = {isa = PBXBuildFile; fileRef = D37917814E7FCE2242F16561; };
+		936AEBA36C8627A94C7D17B5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Render.swift"; sourceTree = "<group>"; };
+		FDD51EE59841038EBE530BF8 = {isa = PBXBuildFile; fileRef = 936AEBA36C8627A94C7D17B5; };
+		62040781AFE2420E27DD05E0 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/Routing.swift"; sourceTree = "<group>"; };
+		D5E23403DBA20947FFB9E950 = {isa = PBXBuildFile; fileRef = 62040781AFE2420E27DD05E0; };
+		1008DD1112155A4F92AC2BD8 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/StudioApp.swift"; sourceTree = "<group>"; };
+		AFC8453C4A4C1AFFC4E9FCB1 = {isa = PBXBuildFile; fileRef = 1008DD1112155A4F92AC2BD8; };
+		32CDAAEAAC23D43648173C49 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "Audio/StudioDSP.c"; sourceTree = "<group>"; };
+		F5E580E9501CE8396BE2D2D8 = {isa = PBXBuildFile; fileRef = 32CDAAEAAC23D43648173C49; };
+		4AD26BF65C6952F521C23816 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "App/Assets.xcassets"; sourceTree = "<group>"; };
+		A14EE7700BFB4FCF12DA6426 = {isa = PBXBuildFile; fileRef = 4AD26BF65C6952F521C23816; };
+		AAB1B1EA851586AB52CB4BD1 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Audio/StudioDSP.h"; sourceTree = "<group>"; };
+		C9F9B9FEB396E6051A8528F5 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/Info.plist"; sourceTree = "<group>"; };
+		C26921A1CD417DB586B52C15 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TakeRoom.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B346A9E891EA79B9B6D43646 = {isa = PBXGroup; children = (C26921A1CD417DB586B52C15); name = Products; sourceTree = "<group>"; };
+		D3AD7991FFA73D323FBF96B4 = {isa = PBXGroup; children = (D693BC72490359F3E88AD8DC, 724E28959E11486CCBB855E3, D37917814E7FCE2242F16561, 936AEBA36C8627A94C7D17B5, 62040781AFE2420E27DD05E0, 1008DD1112155A4F92AC2BD8, 32CDAAEAAC23D43648173C49, 4AD26BF65C6952F521C23816, AAB1B1EA851586AB52CB4BD1, C9F9B9FEB396E6051A8528F5, B346A9E891EA79B9B6D43646); sourceTree = "<group>"; };
+		BB47F6922D229BFF5569C6A6 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (F00778D418FBC00FFF1EC008, 4EBA032557594F512A17AB78, 0B8CDE011E8F4DD1FA91B424, FDD51EE59841038EBE530BF8, D5E23403DBA20947FFB9E950, AFC8453C4A4C1AFFC4E9FCB1, F5E580E9501CE8396BE2D2D8); runOnlyForDeploymentPostprocessing = 0; };
+		E02284C60457BE5A19F028EB = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A14EE7700BFB4FCF12DA6426); runOnlyForDeploymentPostprocessing = 0; };
+		DDE06245FAFE2501F794AA06 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		5CBE72ABED8E39F55DBA88B1 = {isa = XCBuildConfiguration; buildSettings = { IPHONEOS_DEPLOYMENT_TARGET = "17.0"; SDKROOT = "iphoneos"; CLANG_ENABLE_MODULES = "YES"; CLANG_ENABLE_OBJC_ARC = "YES"; SWIFT_VERSION = "5.0"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; GCC_C_LANGUAGE_STANDARD = "gnu17"; DEBUG_INFORMATION_FORMAT = "dwarf"; }; name = Debug; };
+		6BB230EB357596B73358D161 = {isa = XCBuildConfiguration; buildSettings = { IPHONEOS_DEPLOYMENT_TARGET = "17.0"; SDKROOT = "iphoneos"; CLANG_ENABLE_MODULES = "YES"; CLANG_ENABLE_OBJC_ARC = "YES"; SWIFT_VERSION = "5.0"; SWIFT_OPTIMIZATION_LEVEL = "-O"; GCC_C_LANGUAGE_STANDARD = "gnu17"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; }; name = Release; };
+		40328CBBCA0B2647F3A65459 = {isa = XCConfigurationList; buildConfigurations = (5CBE72ABED8E39F55DBA88B1, 6BB230EB357596B73358D161); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A2D5F71CB96E36636FA453F1 = {isa = XCBuildConfiguration; buildSettings = { IPHONEOS_DEPLOYMENT_TARGET = "17.0"; SDKROOT = "iphoneos"; CLANG_ENABLE_MODULES = "YES"; CLANG_ENABLE_OBJC_ARC = "YES"; SWIFT_VERSION = "5.0"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; GCC_C_LANGUAGE_STANDARD = "gnu17"; DEBUG_INFORMATION_FORMAT = "dwarf"; PRODUCT_NAME = "TakeRoom"; PRODUCT_BUNDLE_IDENTIFIER = "studio.takeroom.prototype"; TARGETED_DEVICE_FAMILY = "1"; INFOPLIST_FILE = "App/Info.plist"; CODE_SIGN_STYLE = "Automatic"; ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = "NO"; SWIFT_OBJC_BRIDGING_HEADER = "Audio/StudioDSP.h"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; OTHER_LDFLAGS = "$(inherited) -lz"; CURRENT_PROJECT_VERSION = "1"; MARKETING_VERSION = "0.1.0"; ENABLE_PREVIEWS = "YES"; }; name = Debug; };
+		C729DD1188F8618C6A667E71 = {isa = XCBuildConfiguration; buildSettings = { IPHONEOS_DEPLOYMENT_TARGET = "17.0"; SDKROOT = "iphoneos"; CLANG_ENABLE_MODULES = "YES"; CLANG_ENABLE_OBJC_ARC = "YES"; SWIFT_VERSION = "5.0"; SWIFT_OPTIMIZATION_LEVEL = "-O"; GCC_C_LANGUAGE_STANDARD = "gnu17"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; PRODUCT_NAME = "TakeRoom"; PRODUCT_BUNDLE_IDENTIFIER = "studio.takeroom.prototype"; TARGETED_DEVICE_FAMILY = "1"; INFOPLIST_FILE = "App/Info.plist"; CODE_SIGN_STYLE = "Automatic"; ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = "NO"; SWIFT_OBJC_BRIDGING_HEADER = "Audio/StudioDSP.h"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; OTHER_LDFLAGS = "$(inherited) -lz"; CURRENT_PROJECT_VERSION = "1"; MARKETING_VERSION = "0.1.0"; ENABLE_PREVIEWS = "YES"; }; name = Release; };
+		0A6E1F1FE514FAF39F087F17 = {isa = XCConfigurationList; buildConfigurations = (A2D5F71CB96E36636FA453F1, C729DD1188F8618C6A667E71); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		65B3E592A06DC446FCA7F4AF = {isa = PBXNativeTarget; buildConfigurationList = 0A6E1F1FE514FAF39F087F17; buildPhases = (BB47F6922D229BFF5569C6A6, DDE06245FAFE2501F794AA06, E02284C60457BE5A19F028EB); buildRules = (); dependencies = (); name = TakeRoom; productName = TakeRoom; productReference = C26921A1CD417DB586B52C15; productType = "com.apple.product-type.application"; };
+		EF7A1F7643B3ADF534B13515 = {isa = PBXProject; attributes = {LastSwiftUpdateCheck = 1600; LastUpgradeCheck = 1600;}; buildConfigurationList = 40328CBBCA0B2647F3A65459; compatibilityVersion = "Xcode 14.0"; developmentRegion = ru; hasScannedForEncodings = 0; knownRegions = (ru, en, Base); mainGroup = D3AD7991FFA73D323FBF96B4; productRefGroup = B346A9E891EA79B9B6D43646; projectDirPath = ""; projectRoot = ""; targets = (65B3E592A06DC446FCA7F4AF); };
+	};
+	rootObject = EF7A1F7643B3ADF534B13515;
+}

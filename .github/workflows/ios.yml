@@ -1,0 +1,37 @@
+name: Build unsigned IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify mixer, timing and stem archive
+        run: python3 Tests/test_audio.py
+      - name: Verify AVFoundation export with a timed audio pulse
+        run: bash Tests/render-smoke.sh
+      - name: Build for iPhone
+        run: |
+          set -euo pipefail
+          xcodebuild -project TakeRoom.xcodeproj -scheme TakeRoom -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          mkdir -p build/distribution/Payload
+          ditto build/Build/Products/Release-iphoneos/TakeRoom.app build/distribution/Payload/TakeRoom.app
+          cd build/distribution
+          test -x Payload/TakeRoom.app/TakeRoom
+          /usr/bin/zip -qry TakeRoom-unsigned.ipa Payload
+          unzip -tq TakeRoom-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TakeRoom-unsigned-IPA
+          path: build/distribution/TakeRoom-unsigned.ipa
+          if-no-files-found: error
