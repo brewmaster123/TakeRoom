@@ -49,6 +49,7 @@ struct Beat: Codable, Equatable {
 struct Recording: Codable, Equatable {
     var file: String
     // Seconds inside the original file corresponding to zero on the song timeline.
+    var routeDelayMS: Int? = nil
     var origin: Double
 }
 

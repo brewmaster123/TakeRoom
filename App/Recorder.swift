@@ -29,6 +29,7 @@ final class Recorder: ObservableObject {
     private var recordingStart = 0.0
     private var origin = 0.0
     private var active = true
+    private var routeDelayMS = 0
     private var startedWith: [String] = []
     private var committed = false
     private var finish: ((Recording, Double) -> Void)?
@@ -96,6 +97,7 @@ final class Recorder: ObservableObject {
             guard active else { return }
             phase = .starting
             startedWith = routeIDs()
+            routeDelayMS = UserDefaults.standard.integer(forKey: "BeatDelay:" + startedWith.joined(separator: "|"))
             if pass.main { camera.start(file) }
             else if mic?.record() == true { beginPlayback() }
             else { fail(StudioError.message("Микрофон не начал запись.")) }
@@ -173,7 +175,7 @@ final class Recorder: ObservableObject {
             guard active else { return }
             committed = true
             phase = .ended
-            finish?(Recording(file: file.lastPathComponent, origin: trim), length)
+            finish?(Recording(file: file.lastPathComponent, routeDelayMS: routeDelayMS, origin: trim), length)
         } catch { fail(error) }
     }
     func close() {

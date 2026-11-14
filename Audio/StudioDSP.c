@@ -35,7 +35,7 @@ TRWindow tr_window(int64_t start, int64_t count, int64_t total) {
     return (TRWindow){skip, dest, length};
 }
 int tr_blank_wave(const char *path, int64_t frames) {
-    if (frames <= 0 || frames > 44100 * 600) return -1;
+    if (frames <= 0 || frames > (UINT32_MAX - 36u) / 4u) return -1;
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
     wave_header(f, (uint32_t)frames);
@@ -60,7 +60,7 @@ static float ambience(Room *r, float sample, int channel) {
     return sum * 0.33f;
 }
 int tr_mix(const char *directory, const char *out, int64_t frames, const float gains[4], const float wet[4]) {
-    if (frames <= 0 || frames > 44100 * 600) return -1;
+    if (frames <= 0 || frames > (UINT32_MAX - 36u) / 4u) return -1;
     FILE *files[4] = {NULL}, *dst = NULL;
     Room *room = calloc(1, sizeof(Room));
     int ok = 0;
@@ -102,7 +102,7 @@ done:
     return ok ? 0 : -1;
 }
 // ZIP32 STORE streams media without buffering it in memory. Sizes/checksums go
-// into the local headers and the central directory. The app caps takes at 90 s.
+// into the local headers and the central directory.
 typedef struct { uint32_t crc, size, offset; } Entry;
 int tr_pack(const char *directory, const char *out) {
     Entry entries[5] = {0};

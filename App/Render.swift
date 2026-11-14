@@ -39,7 +39,7 @@ enum Render {
             if let source = take.source(lane) {
                 try await decode(folder.appendingPathComponent(source.file), to: wav,
                                  origin: source.origin,
-                                 shift: lane == .lead ? 0 : Double(strip.shiftMS) / 1000,
+                                 shift: Double(strip.shiftMS) / 1000,
                                  frames: frames)
             }
             gains.append(audible ? Float(strip.gain) : 0)

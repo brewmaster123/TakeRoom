@@ -113,8 +113,10 @@ struct Editor: View {
     @State private var section = Page.write
     @State private var looping = true
     @State private var importer = false
+    @State private var selectingFragment = false
     @State private var pickedBeat: URL?
     @State private var sound = false
+    @State private var syncing = false
     @State private var pass: Pass?
     @State private var busy: String?
     @State private var error: String?
@@ -189,12 +191,14 @@ struct Editor: View {
                 Label(song.beat?.name ?? "Загрузить из Файлов", systemImage: "waveform.badge.plus")
             }
             if let beat = song.beat {
-                if beat.duration > 1.01 {
-                    LabeledContent("Начало фрагмента", value: String(format: "%.1f с", song.start))
-                    Slider(value: $song.start, in: 0...max(0.01, beat.duration - 1), step: 0.1)
-                        .accessibilityLabel("Начало фрагмента")
-                }
-                Stepper("Длина · \(Int(song.target)) с", value: $song.target, in: 5...90, step: 5)
+                Button("Выбрать фрагмент на волне") { loopPlayer.stop(); selectingFragment = true }
+                    .sheet(isPresented: $selectingFragment) {
+                        FragmentEditor(beat: beat, url: folder.appendingPathComponent(beat.file),
+                                       start: song.start, length: song.length) { start, length in
+                            song.start = start
+                            song.target = length
+                        }
+                    }
                 Toggle("Повтор фрагмента", isOn: $looping)
                 Button {
                     if loopPlayer.playing { loopPlayer.stop(); return }
@@ -251,6 +255,21 @@ struct Editor: View {
     @ViewBuilder private var mixPanel: some View {
         takePicker
         if let index = song.takes.firstIndex(where: { $0.id == song.selected }) {
+            Button("Совместить с битом") { syncing = true }
+                .sheet(isPresented: $syncing) {
+                    let id = song.takes[index].id
+                    BeatSyncView(take: song.takes[index], folder: folder, savedShift: Binding(
+                        get: { song.current?.strips[.beat]?.shiftMS ?? 0 },
+                        set: { value in
+                            if let i = song.takes.firstIndex(where: { $0.id == id }) {
+                                song.takes[i].strips[.beat, default: Strip(gain: 0.65)].shiftMS = value
+                            }
+                        }), saveVoice: { value in
+                            if let i = song.takes.firstIndex(where: { $0.id == id }) {
+                                song.takes[i].strips[.lead, default: Strip(gain: 1)].shiftMS = value
+                            }
+                        })
+                }
             ForEach(Lane.allCases) { lane in
                 let settings = Binding<Strip>(get: { song.takes[index].strips[lane] ?? Strip(gain: 1) },
                                               set: { song.takes[index].strips[lane] = $0 })
@@ -278,9 +297,11 @@ struct Editor: View {
     }
     private func accept(_ recording: Recording, seconds: Double, job: Pass) {
         if job.main, let beat = job.song.beat {
-            let take = Take(video: recording, beat: beat, beatStart: job.song.start, duration: seconds)
+            var take = Take(video: recording, beat: beat, beatStart: job.song.start, duration: seconds)
+            take.strips[.beat]?.shiftMS = recording.routeDelayMS ?? 0
             song.takes.append(take); song.selected = take.id
         } else if let i = song.takes.firstIndex(where: { $0.id == job.song.selected }) {
+            song.takes[i].strips[job.lane]?.shiftMS = -(recording.routeDelayMS ?? 0)
             if job.lane == .back1 { song.takes[i].back1 = recording }
             if job.lane == .back2 { song.takes[i].back2 = recording }
         }
@@ -291,6 +312,8 @@ struct Editor: View {
         do {
             song.beat = try await Self.copyBeat(url, folder: folder)
             song.start = 0
+            song.target = song.beat?.duration ?? 60
+            selectingFragment = true
         } catch { self.error = "Не удалось импортировать «\(url.lastPathComponent)». \(error.localizedDescription)" }
     }
     nonisolated private static func copyBeat(_ source: URL, folder: URL) async throws -> Beat {
@@ -343,6 +366,136 @@ struct Editor: View {
     }
 }
 
+private struct BeatSyncView: View {
+    let take: Take
+    let folder: URL
+    let saveVoice: (Int) -> Void
+    @State private var adjustingVoice = false
+    @State private var voice: Double
+    @Binding var savedShift: Int
+    @Environment(\.dismiss) private var dismiss
+    @State private var shift: Double
+    @State private var start = 0.0
+    @State private var player = AVPlayer()
+    @State private var problem: String?
+
+    init(take: Take, folder: URL, savedShift: Binding<Int>, saveVoice: @escaping (Int) -> Void) {
+        self.saveVoice = saveVoice
+        _voice = State(initialValue: Double(take.strips[.lead]?.shiftMS ?? 0))
+        self.take = take
+        self.folder = folder
+        _savedShift = savedShift
+        _shift = State(initialValue: Double(savedShift.wrappedValue))
+    }
+
+    private func nudge(_ step: Double) {
+        if adjustingVoice { voice = min(1000, max(-1000, voice + step)) }
+        else { shift = min(1000, max(-1000, shift + step)) }
+    }
+    @State private var repeating = false
+    private var span: Double { repeating ? min(4, take.duration) : take.duration }
+    private var beginning: Double { repeating ? start : 0 }
+    private var position: Double { max(0, player.currentTime().seconds.isFinite ? player.currentTime().seconds : 0) }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                VideoPlayer(player: player)
+                if let problem { Text(problem).foregroundStyle(.red) }
+                Toggle("Повтор фразы · 4 секунды", isOn: $repeating)
+                if take.duration > span {
+                    Slider(value: $start, in: 0...(take.duration - span))
+                        .accessibilityLabel("Начало повтора")
+                    Text("Начало фрагмента · " + String(format: "%.1f с", start))
+                }
+                Picker("Двигать", selection: $adjustingVoice) {
+                    Text("Бит").tag(false)
+                    Text("Голос").tag(true)
+                }.pickerStyle(.segmented)
+                Slider(value: adjustingVoice ? $voice : $shift, in: -1000...1000, step: 5)
+                    .accessibilityLabel(adjustingVoice ? "Сдвиг голоса" : "Сдвиг бита")
+                HStack {
+                    Button("Раньше") { nudge(-5) }
+                    Spacer()
+                    Button("Сброс") { if adjustingVoice { voice = 0 } else { shift = 0 } }
+                    Spacer()
+                    Button("Позже") { nudge(5) }
+                }
+                Button("Применить") { savedShift = Int(shift); saveVoice(Int(voice)); dismiss() }
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding()
+            .navigationTitle("Совместить с битом")
+            .toolbar { Button("Закрыть") { dismiss() } }
+        }
+        .task(id: [beginning, shift, span, voice]) {
+            do {
+                try await Task.sleep(nanoseconds: 40_000_000)
+                let composition = AVMutableComposition()
+                let video = AVURLAsset(url: folder.appendingPathComponent(take.video.file))
+                let beat = AVURLAsset(url: folder.appendingPathComponent(take.beat.file))
+                func time(_ seconds: Double) -> CMTime {
+                    CMTime(seconds: seconds, preferredTimescale: 44100)
+                }
+                composition.insertEmptyTimeRange(CMTimeRange(start: .zero, duration: time(span)))
+                var levels = [AVAudioMixInputParameters]()
+                func insert(_ asset: AVAsset, type: AVMediaType, origin: Double,
+                            offset: Double, lane: Lane) async throws {
+                    guard let source = try await asset.loadTracks(withMediaType: type).first else {
+                        throw StudioError.message("В файле нет нужной дорожки.")
+                    }
+                    let valid = try await source.load(.timeRange)
+                    let zero = origin - offset
+                    let first = max(origin, zero + beginning, valid.start.seconds)
+                    let last = min(origin + take.duration, zero + beginning + span, valid.end.seconds)
+                    guard last > first else { return }
+                    guard let track = composition.addMutableTrack(withMediaType: type, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                        throw StudioError.message("Не удалось открыть дорожку.")
+                    }
+                    try track.insertTimeRange(CMTimeRange(start: time(first), duration: time(last - first)),
+                                              of: source, at: time(max(0, first - zero - beginning)))
+                    if type == .video {
+                        track.preferredTransform = try await source.load(.preferredTransform)
+                    } else {
+                        let strip = take.strips[lane] ?? Strip(gain: 1)
+                        let params = AVMutableAudioMixInputParameters(track: track)
+                        params.setVolume(strip.muted ? 0 : Float(strip.gain), at: .zero)
+                        levels.append(params)
+                    }
+                }
+                try await insert(video, type: .video, origin: take.video.origin, offset: 0, lane: .lead)
+                try await insert(video, type: .audio, origin: take.video.origin, offset: voice / 1000, lane: .lead)
+                try await insert(beat, type: .audio, origin: take.beatStart, offset: shift / 1000, lane: .beat)
+                for lane in [Lane.back1, .back2] {
+                    if let source = take.source(lane) {
+                        try await insert(AVURLAsset(url: folder.appendingPathComponent(source.file)), type: .audio,
+                                         origin: source.origin, offset: Double(take.strips[lane]?.shiftMS ?? 0) / 1000, lane: lane)
+                    }
+                }
+                try Task.checkCancellation()
+                let resume = position.truncatingRemainder(dividingBy: span)
+                let item = AVPlayerItem(asset: composition)
+                let mix = AVMutableAudioMix()
+                mix.inputParameters = levels
+                item.audioMix = mix
+                problem = nil
+                player.replaceCurrentItem(with: item)
+                await player.seek(to: time(resume), toleranceBefore: .zero, toleranceAfter: .zero)
+                try Task.checkCancellation()
+                player.play()
+            } catch {
+                if !Task.isCancelled { problem = error.localizedDescription }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
+            guard repeating, let item = note.object as? AVPlayerItem, item === player.currentItem else { return }
+            player.seek(to: .zero)
+            player.play()
+        }
+        .onDisappear { player.pause(); player.replaceCurrentItem(with: nil) }
+    }
+}
+
 private struct ChannelStrip: View {
     let lane: Lane
     @Binding var strip: Strip
@@ -353,7 +506,7 @@ private struct ChannelStrip: View {
                 Toggle("Звук", isOn: Binding(get: { !strip.muted }, set: { strip.muted = !$0 }))
                 LabeledContent("Громкость", value: "\(Int((strip.gain * 100).rounded())) %")
                 Slider(value: $strip.gain, in: 0...1).accessibilityLabel("Громкость \(lane.title)")
-                if lane != .lead {
+                Group {
                     Stepper("Сдвиг · \(strip.shiftMS) мс", value: $strip.shiftMS, in: -1000...1000, step: 5)
                     Slider(value: Binding(get: { Double(strip.shiftMS) }, set: { strip.shiftMS = Int($0.rounded()) }),
                            in: -1000...1000, step: 5).accessibilityLabel("Сдвиг по времени")
@@ -387,5 +540,100 @@ private struct MoviePreview: View {
                 .navigationTitle("Дубль").navigationBarTitleDisplayMode(.inline)
                 .toolbar { Button("Готово") { dismiss() } }
         }
+    }
+}
+
+private struct FragmentEditor: View {
+    let beat: Beat
+    let url: URL
+    let apply: (Double, Double) -> Void
+    @Environment(\.dismiss) var dismiss
+    @StateObject private var sound = LoopPlayer()
+    @State private var left: Double
+    @State private var right: Double
+    @State private var cursor: Double
+    @State private var peaks = [Float]()
+    @State private var message: String?
+
+    init(beat: Beat, url: URL, start: Double, length: Double, apply: @escaping (Double, Double) -> Void) {
+        self.beat = beat
+        self.url = url
+        self.apply = apply
+        _left = State(initialValue: start)
+        _right = State(initialValue: min(beat.duration, start + length))
+        _cursor = State(initialValue: start)
+    }
+    private func clock(_ t: Double) -> String {
+        String(format: "%d:%04.1f", Int(t) / 60, t.truncatingRemainder(dividingBy: 60))
+    }
+    private func play(_ t: Double, until end: Double, repeatPart: Bool) {
+        guard end > t else { return }
+        do {
+            cursor = t
+            try sound.start(url, from: t, length: end - t, loop: repeatPart)
+        } catch { message = error.localizedDescription }
+    }
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(beat.name) {
+                    GeometryReader { geo in
+                        Canvas { context, size in
+                            let width = size.width
+                            let mid = size.height / 2
+                            let l = width * left / beat.duration
+                            let r = width * right / beat.duration
+                            context.fill(Path(CGRect(x: l, y: 0, width: r-l, height: size.height)), with: .color(.mint.opacity(0.22)))
+                            var path = Path()
+                            for (i, peak) in peaks.enumerated() {
+                                let x = width * CGFloat(i) / CGFloat(peaks.count)
+                                let h = max(1, CGFloat(peak) * mid)
+                                path.move(to: CGPoint(x: x, y: mid-h))
+                                path.addLine(to: CGPoint(x: x, y: mid+h))
+                            }
+                            context.stroke(path, with: .color(.mint))
+                            for t in [left, right, min(beat.duration, cursor + sound.position)] {
+                                context.fill(Path(CGRect(x: width*t/beat.duration, y: 0, width: 2, height: size.height)), with: .color(.primary))
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { point in
+                            play(max(0, min(beat.duration, point.x / geo.size.width * beat.duration)), until: beat.duration, repeatPart: false)
+                        }
+                    }.frame(height: 92)
+                    Text("Коснись волны, чтобы послушать с этого места.")
+                    Text("Начало · " + clock(left))
+                    Slider(value: Binding(get: { left }, set: { sound.stop(); left = min($0, right - 0.5) }), in: 0...beat.duration)
+                    Text("Конец · " + clock(right))
+                    Slider(value: Binding(get: { right }, set: { sound.stop(); right = max($0, left + 0.5) }), in: 0...beat.duration)
+                    Button(sound.playing ? "Стоп" : "Слушать фрагмент по кругу") {
+                        if sound.playing { sound.stop() } else { play(left, until: right, repeatPart: true) }
+                    }
+                    Button("Использовать фрагмент · " + clock(right-left)) { apply(left, right-left); dismiss() }
+                    if let message { Text(message) }
+                }
+            }.navigationTitle("Фрагмент бита")
+            .toolbar { Button("Закрыть") { dismiss() } }
+        }.task(id: url) {
+            do { peaks = try await Self.envelope(url) }
+            catch { if !Task.isCancelled { message = error.localizedDescription } }
+        }.onDisappear { sound.stop() }
+    }
+    nonisolated private static func envelope(_ url: URL) async throws -> [Float] {
+        let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 8192) else { throw StudioError.message("Не удалось прочитать волну.") }
+        var result = [Float](repeating: 0, count: 720)
+        let total = max(1, file.length)
+        while file.framePosition < total {
+            try Task.checkCancellation()
+            let offset = file.framePosition
+            try file.read(into: buffer)
+            guard buffer.frameLength > 0, let channels = buffer.floatChannelData else { break }
+            for i in stride(from: 0, to: Int(buffer.frameLength), by: 8) {
+                let bin = min(719, Int((offset + Int64(i)) * 720 / total))
+                result[bin] = max(result[bin], abs(channels[0][i]))
+            }
+        }
+        return result
     }
 }
