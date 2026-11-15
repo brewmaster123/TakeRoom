@@ -9,6 +9,7 @@ final class Routes: ObservableObject {
     @Published var outputName = "—"
     @Published var preference = UserDefaults.standard.string(forKey: "preferredMic") ?? ""
     @Published var headsetMic = UserDefaults.standard.bool(forKey: "enableHFP")
+    @Published var speakerOutput = false
     @Published var error: String?
     private var observer: NSObjectProtocol?
     private let audio = AVAudioSession.sharedInstance()
@@ -32,7 +33,16 @@ final class Routes: ObservableObject {
            audio.preferredInput?.uid != port.uid {
             try audio.setPreferredInput(port)
         }
+        if speakerOutput { try audio.overrideOutputAudioPort(.speaker) }
         refresh()
+    }
+    func speaker(_ enabled: Bool) {
+        do {
+            try audio.overrideOutputAudioPort(enabled ? .speaker : .none)
+            speakerOutput = enabled
+            if let port = audio.availableInputs?.first(where: { $0.uid == preference }) { try audio.setPreferredInput(port) }
+            refresh()
+        } catch { self.error = error.localizedDescription }
     }
     func select(_ uid: String) {
         do {
@@ -87,6 +97,7 @@ struct SoundSettings: View {
                     LabeledContent("Запись", value: routes.inputName)
                     HStack { Text("Прослушивание"); Spacer(); Text(routes.outputName); OutputPicker().frame(width: 44, height: 44) }
                 }
+                Toggle("Динамик iPhone для опорной строки",isOn: Binding(get: { routes.speakerOutput },set: routes.speaker))
                 LatencyTest()
                 if let message = routes.error { Text(message).foregroundStyle(.red) }
             }
@@ -107,7 +118,7 @@ private struct LatencyTest: View {
 
     var body: some View {
         Section("Тест задержки") {
-            Text("Надень наушники. Слушай первые четыре щелчка, затем восемь раз скажи «та» в ритм.")
+            Text("Поднеси один наушник к выбранному микрофону. Держи его рядом до окончания серии щелчков.")
             Button(testing ? "Остановить тест" : "Проверить задержку") {
                 if testing { run?.cancel() }
                 else {
@@ -138,17 +149,20 @@ private struct LatencyTest: View {
             try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: scratch) }
             let rate = 24000.0
-            let interval = 0.75
-            let count = Int(rate * 12 * interval)
+            let pulses = [0.7, 1.6, 2.78, 3.6, 4.66, 5.55, 6.80, 7.74]
+            let count = Int(rate * 9)
             let clickURL = scratch.appendingPathComponent("click.caf")
             let micURL = scratch.appendingPathComponent("voice.caf")
             guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
                   let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
                   let samples = buffer.floatChannelData?[0] else { throw StudioError.message("Не удалось создать метроном.") }
             buffer.frameLength = AVAudioFrameCount(count)
-            for n in 0..<count {
-                let phase = Double(n % Int(rate * interval)) / rate
-                samples[n] = phase < 0.025 ? Float(0.45 * sin(phase * 7000) * exp(-phase * 180)) : 0
+            samples.update(repeating: 0, count: count)
+            for onset in pulses {
+                for n in 0..<720 {
+                    let t = Double(n) / rate
+                    samples[Int(onset * rate) + n] = Float(0.55 * sin(t * 7000) * exp(-t * 90))
+                }
             }
             do {
                 let out = try AVAudioFile(forWriting: clickURL, settings: format.settings)
@@ -160,20 +174,18 @@ private struct LatencyTest: View {
             guard recorder.prepareToRecord(), player.prepareToPlay() else { throw StudioError.message("Не удалось подготовить звук.") }
             let begin = player.deviceCurrentTime + 0.35
             guard recorder.record(atTime: begin), player.play(atTime: begin) else { throw StudioError.message("Метроном или микрофон не запустился.") }
-            message = "Слушай метроном…"
-            try await Task.sleep(nanoseconds: 3_250_000_000)
-            message = "Теперь «та» на каждый щелчок."
-            try await Task.sleep(nanoseconds: 6_500_000_000)
+            message = "Измеряю время возврата щелчков…"
+            try await Task.sleep(nanoseconds: 9_500_000_000)
             recorder.stop()
             guard routes.routeKey == key else { throw StudioError.message("Аудиоустройства изменились. Повтори тест.") }
-            let value = try Self.analyze(micURL, interval: interval)
+            let value = try Self.analyze(micURL, pulses: pulses)
             testedRoute = key
             candidate = value
             message = "Предлагаемая поправка бита: " + String(value) + " мс."
         } catch { message = Task.isCancelled ? "Тест остановлен." : error.localizedDescription }
     }
 
-    private static func analyze(_ url: URL, interval: Double) throws -> Int {
+    private static func analyze(_ url: URL, pulses: [Double]) throws -> Int {
         let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else { throw StudioError.message("Пустая запись.") }
         try file.read(into: buffer)
@@ -188,14 +200,13 @@ private struct LatencyTest: View {
             levels.append(sqrt(power / Double(end-start)))
         }
         let tick = Double(hop) / rate
-        let baseline = Array(levels.prefix(Int(2.7 / tick))).sorted()
+        let baseline = Array(levels.prefix(Int(0.6 / tick))).sorted()
         guard !baseline.isEmpty else { throw StudioError.message("Пустая запись.") }
         let floorLevel = max(0.002, baseline[baseline.count * 99 / 100] * 2.3)
         var shifts = [Double]()
-        for beat in 4..<12 {
-            let expected = Double(beat) * interval
-            let lo = max(1, Int((expected - 0.23) / tick))
-            let hi = min(levels.count - 3, Int((expected + 0.48) / tick))
+        for expected in pulses {
+            let lo = max(1, Int((expected - 0.04) / tick))
+            let hi = min(levels.count - 3, Int((expected + 0.70) / tick))
             guard hi > lo else { continue }
             let threshold = max(floorLevel, (levels[lo...hi].max() ?? 0) * 0.15)
             if let onset = (lo...hi).first(where: { levels[$0-1] < threshold && levels[$0] >= threshold && levels[$0+1] >= threshold && levels[$0+2] >= threshold }) {
@@ -203,9 +214,9 @@ private struct LatencyTest: View {
             }
         }
         shifts.sort()
-        guard shifts.count >= 6 else { throw StudioError.message("Мало чётких слогов. Повтори тест ближе к микрофону.") }
+        guard shifts.count >= 6 else { throw StudioError.message("Щелчки плохо слышны. Поднеси наушник ближе и повтори.") }
         let median = shifts[shifts.count / 2]
-        guard shifts.filter({ abs($0 - median) < 0.065 }).count >= 6 else { throw StudioError.message("Слоги сильно расходятся по времени. Повтори тест.") }
+        guard shifts.filter({ abs($0 - median) < 0.018 }).count >= 6 else { throw StudioError.message("Задержка нестабильна. Повтори тест.") }
         return Int((median * 1000).rounded())
     }
 }
@@ -213,6 +224,6 @@ private struct LatencyTest: View {
 extension Routes {
     var routeKey: String {
         let route = AVAudioSession.sharedInstance().currentRoute
-        return "BeatDelay:" + (route.inputs + route.outputs).map(\.uid).joined(separator: "|")
+        return "AcousticDelay:" + (route.inputs + route.outputs).map(\.uid).joined(separator: "|")
     }
 }

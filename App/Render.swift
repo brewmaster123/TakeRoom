@@ -2,7 +2,7 @@ import AVFoundation
 import CoreImage
 import Foundation
 
-enum Product { case movie, stems, monitor(excluding: Lane) }
+enum Product { case movie, stems, audioMix, monitor(excluding: Lane) }
 
 enum Render {
     static let rate = 44100.0
@@ -16,7 +16,7 @@ enum Render {
         switch product {
         case .movie: suffix = "mp4"
         case .stems: suffix = "zip"
-        case .monitor: suffix = "wav"
+        case .audioMix, .monitor: suffix = "wav"
         }
         let result = files.temporaryDirectory
             .appendingPathComponent("Take-\(UUID().uuidString.prefix(8)).\(suffix)")
@@ -24,7 +24,7 @@ enum Render {
         defer { if !complete { try? files.removeItem(at: result) } }
         let frames = Int64((take.duration * rate).rounded(.down))
         guard frames > 0 else { throw StudioError.message("Слишком короткий дубль.") }
-        var gains = [Float](), sends = [Float]()
+        var effects = [TREffect]()
         for lane in Lane.allCases {
             try Task.checkCancellation()
             let strip = take.strips[lane] ?? Strip(gain: 1)
@@ -34,36 +34,99 @@ enum Render {
             }
             var audible = !strip.muted
             if case .monitor(let exclude) = product, lane == exclude { audible = false }
-            // Trackout is dry, pre-fader and includes muted takes. The lead stays
-            // locked to the picture. Beat and backing offsets use the same timeline.
             if let source = take.source(lane) {
                 try await decode(folder.appendingPathComponent(source.file), to: wav,
                                  origin: source.origin,
                                  shift: Double(strip.shiftMS) / 1000,
                                  frames: frames)
             }
-            gains.append(audible ? Float(strip.gain) : 0)
-            sends.append(Float(strip.room))
+            let fx = strip.effects ?? VoiceFX()
+            func amplitude(_ db: Double) -> Float { Float(pow(10, db / 20)) }
+            effects.append(TREffect(gain: audible ? Float(strip.gain) : 0, room: Float(strip.room),
+                                    compression: Float(fx.compression), low: amplitude(fx.low), mid: amplitude(fx.mid),
+                                    high: amplitude(fx.high), drive: Float(fx.drive), blend: Float(fx.blend)))
         }
         try Task.checkCancellation()
+        let exportStems: Bool
+        if case .stems = product { exportStems = true } else { exportStems = false }
+        let cuts = (take.cuts ?? []).sorted { $0.start < $1.start }.map {
+            TRCut(start: Int64($0.start * rate), end: Int64($0.end * rate))
+        }
+        guard tr_produce(scratch.path, frames, effects, Float(take.duck ?? 0), Float(take.density ?? 0),
+                         cuts, Int32(cuts.count), exportStems ? 1 : 0) == 0 else {
+            throw StudioError.message("Не удалось обработать звук. Проверь свободное место.")
+        }
+        let mix = scratch.appendingPathComponent("Master.wav")
         switch product {
         case .stems:
+            for lane in Lane.allCases {
+                let dry = scratch.appendingPathComponent(lane.wav)
+                try files.removeItem(at: dry)
+                try files.moveItem(at: scratch.appendingPathComponent("processed-" + lane.wav), to: dry)
+            }
             try await movie(take, folder: folder, audio: nil, frames: frames,
                             to: scratch.appendingPathComponent("00-video.mp4"))
-            guard tr_pack(scratch.path, result.path) == 0 else {
+            guard tr_pack_processed(scratch.path, result.path) == 0 else {
                 throw StudioError.message("Не удалось собрать архив Stems.")
             }
-        case .monitor, .movie:
-            let mix = scratch.appendingPathComponent("mix.wav")
-            guard tr_mix(scratch.path, mix.path, frames, gains, sends) == 0 else {
-                throw StudioError.message("Не удалось свести дорожки.")
-            }
+        case .audioMix, .monitor, .movie:
             if case .movie = product {
                 try await movie(take, folder: folder, audio: mix, frames: frames, to: result)
             } else { try files.moveItem(at: mix, to: result) }
         }
         complete = true
         return result
+    }
+
+    static func effects(_ take: Take) -> [TREffect] {
+        Lane.allCases.map { lane in
+            let strip = take.strips[lane] ?? Strip(gain: 1)
+            let fx = strip.effects ?? VoiceFX()
+            func db(_ value: Double) -> Float { Float(pow(10,value/20)) }
+            return TREffect(gain: strip.muted ? 0 : Float(strip.gain), room: Float(strip.room),
+                            compression: Float(fx.compression), low: db(fx.low), mid: db(fx.mid), high: db(fx.high),
+                            drive: Float(fx.drive), blend: Float(fx.blend))
+        }
+    }
+    static func cuts(_ take: Take) -> [TRCut] {
+        (take.cuts ?? []).map { TRCut(start: Int64(max(0,$0.start)*rate),end: Int64(min(take.duration,$0.end)*rate)) }
+            .filter { $0.end > $0.start }
+    }
+    static func previewSources(_ take: Take, folder: URL) async throws -> URL {
+        let directory = files.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try files.createDirectory(at: directory,withIntermediateDirectories: true)
+        do {
+            let frames = Int64(take.duration*rate)
+            for lane in Lane.allCases {
+                try Task.checkCancellation()
+                let url = directory.appendingPathComponent(lane.wav)
+                guard tr_blank_wave(url.path,frames) == 0 else { throw StudioError.message("Недостаточно места для предпросмотра.") }
+                if let source = take.source(lane) {
+                    try await decode(folder.appendingPathComponent(source.file),to: url,origin: source.origin,shift: 0,frames: frames)
+                }
+            }
+            return directory
+        } catch { try? files.removeItem(at: directory); throw error }
+    }
+    static func previewWaves(directory: URL) async throws -> [Lane:[Float]] {
+        var waves = [Lane:[Float]]()
+        for lane in Lane.allCases {
+            let file = try AVAudioFile(forReading: directory.appendingPathComponent(lane.wav))
+            guard let block = AVAudioPCMBuffer(pcmFormat: file.processingFormat,frameCapacity: 8192) else { continue }
+            var peaks = [Float](repeating: 0,count: 6000)
+            while file.framePosition < file.length {
+                try Task.checkCancellation()
+                let offset = file.framePosition
+                try file.read(into: block)
+                guard block.frameLength > 0, let channel = block.floatChannelData?[0] else { break }
+                for i in stride(from: 0,to: Int(block.frameLength),by: 8) {
+                    let bin = min(peaks.count-1,Int((offset+Int64(i))*Int64(peaks.count)/max(1,file.length)))
+                    peaks[bin] = max(peaks[bin],abs(channel[i]))
+                }
+            }
+            waves[lane] = peaks
+        }
+        return waves
     }
 
     // The reader returns timestamped PCM blocks. Place each one at its actual

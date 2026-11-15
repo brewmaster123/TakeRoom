@@ -7,8 +7,9 @@ struct Pass: Identifiable {
     let lane: Lane
     let song: Song
     let folder: URL
-    var main: Bool { lane == .lead }
-    var limit: Double { main ? song.length : song.current?.duration ?? 0 }
+    var reference = false
+    var main: Bool { lane == .lead && !reference }
+    var limit: Double { (reference || main) ? song.length : song.current?.duration ?? 0 }
 }
 
 @MainActor
@@ -17,10 +18,12 @@ final class Recorder: ObservableObject {
     @Published var phase = Phase.loading
     @Published var message = ""
     @Published var seconds = 0.0
+    @Published var promptSeconds = 0.0
     @Published var level = 0.0
     let camera = MovieCamera()
     let pass: Pass
     private let file: URL
+    private var click: AVAudioPlayer?
     private var monitor: AVAudioPlayer?
     private var mic: AVAudioRecorder?
     private var preparedMonitor: URL?
@@ -62,10 +65,15 @@ final class Recorder: ObservableObject {
                     guard let self else { return }
                     Task { await self.complete(error) }
                 }
-            } else if let take = pass.song.current {
-                url = try await Render.make(.monitor(excluding: pass.lane), take: take, folder: pass.folder)
-                preparedMonitor = url
-                guard active, !Task.isCancelled else { try? FileManager.default.removeItem(at: url); return }
+            } else if pass.reference || pass.song.current != nil {
+                if pass.reference, let beat = pass.song.beat {
+                    url = pass.folder.appendingPathComponent(beat.file)
+                } else if let take = pass.song.current {
+                    url = try await Render.make(.monitor(excluding: pass.lane), take: take, folder: pass.folder)
+                    preparedMonitor = url
+                } else { throw StudioError.message("Выбери бит.") }
+
+                guard active, !Task.isCancelled else { if let preparedMonitor { try? FileManager.default.removeItem(at: preparedMonitor) }; return }
                 let settings: [String: Any] = [AVFormatIDKey: kAudioFormatLinearPCM,
                     AVSampleRateKey: 44100, AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
                     AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsFloatKey: false]
@@ -76,8 +84,16 @@ final class Recorder: ObservableObject {
             } else { throw StudioError.message("Сначала выбери бит и запиши основной дубль.") }
             let player = try AVAudioPlayer(contentsOf: url)
             guard player.prepareToPlay() else { throw StudioError.message("Не удалось подготовить дорожки.") }
-            player.currentTime = pass.main ? pass.song.start : 0
-            player.volume = pass.main ? 0.65 : 1
+            player.currentTime = (pass.main || pass.reference) ? pass.song.start : 0
+            player.volume = (pass.main || pass.reference) ? 0.65 : 1
+            if pass.song.metronome == true && !pass.reference {
+                let beat = pass.main ? pass.song.beat : pass.song.current?.beat
+                if let beat, let bpm = beat.bpm, bpm > 0 {
+                    let start = pass.main ? pass.song.start : pass.song.current?.beatStart ?? 0
+                    let shift = pass.main ? 0 : Double(pass.song.current?.strips[.beat]?.shiftMS ?? 0)/1000
+                    click = try ClickTrack.make(bpm: bpm, anchor: (beat.anchor ?? 0) + shift, start: start)
+                }
+            }
             monitor = player
             routes.refresh()
             phase = .ready
@@ -97,9 +113,9 @@ final class Recorder: ObservableObject {
             guard active else { return }
             phase = .starting
             startedWith = routeIDs()
-            routeDelayMS = UserDefaults.standard.integer(forKey: "BeatDelay:" + startedWith.joined(separator: "|"))
+            routeDelayMS = UserDefaults.standard.integer(forKey: "AcousticDelay:" + startedWith.joined(separator: "|"))
             if pass.main { camera.start(file) }
-            else if mic?.record() == true { beginPlayback() }
+            else if mic != nil { beginPlayback() }
             else { fail(StudioError.message("Микрофон не начал запись.")) }
         }
     }
@@ -109,13 +125,26 @@ final class Recorder: ObservableObject {
         }
         // Once capture is running, put song zero on its timeline. Both audio and
         // video are trimmed by the same amount; route latency is adjusted in Mix.
-        let position = pass.main ? camera.output.recordedDuration.seconds : mic?.currentTime ?? 0
-        origin = position.isFinite ? max(0, position) : 0
-        guard monitor.play() else {
-            fail(StudioError.message("Устройство не начало воспроизведение."))
+        let leadIn = 0.35
+        let now = monitor.deviceCurrentTime
+        let start = now + leadIn
+        if pass.main {
+            let elapsed = camera.output.recordedDuration.seconds
+            guard elapsed.isFinite else { fail(StudioError.message("Камера не вернула время записи.")); camera.stopRecording(); return }
+            origin = max(0, elapsed) + leadIn
+        } else {
+            // Both record and playback are scheduled against the audio device clock.
+            origin = 0
+            guard mic?.record(atTime: start) == true else {
+                fail(StudioError.message("Микрофон не начал запись.")); return
+            }
+        }
+        guard monitor.play(atTime: start) else {
+            fail(StudioError.message("Не запустился бит."))
             camera.stopRecording(); mic?.stop(); return
         }
-        recordingStart = ProcessInfo.processInfo.systemUptime
+        click?.play(atTime: start)
+        recordingStart = start
         phase = .live
     }
     private func routeIDs() -> [String] {
@@ -142,21 +171,24 @@ final class Recorder: ObservableObject {
             level = max(0, min(1, (Double(mic?.averagePower(forChannel: 0) ?? -160) + 54) / 54))
         }
         guard phase == .live else { return }
-        seconds = min(pass.limit, ProcessInfo.processInfo.systemUptime - recordingStart)
+        seconds = min(pass.limit, max(0, (monitor?.deviceCurrentTime ?? recordingStart) - recordingStart))
+        promptSeconds = max(0,seconds-AVAudioSession.sharedInstance().outputLatency)
         if seconds >= pass.limit { stop() }
     }
     func stop() {
         guard phase == .live else { return }
-        seconds = min(pass.limit, ProcessInfo.processInfo.systemUptime - recordingStart)
+        seconds = min(pass.limit, max(0, (monitor?.deviceCurrentTime ?? recordingStart) - recordingStart))
         phase = .saving
+        click?.stop()
         monitor?.stop()
         if pass.main { camera.stopRecording() }
         else { mic?.stop(); Task { await complete(nil) } }
     }
     private func complete(_ error: Error?) async {
         guard active, phase == .saving || phase == .live || phase == .starting else { return }
-        if phase == .live { seconds = min(pass.limit, ProcessInfo.processInfo.systemUptime - recordingStart) }
+        if phase == .live { seconds = min(pass.limit, max(0, (monitor?.deviceCurrentTime ?? recordingStart) - recordingStart)) }
         phase = .saving
+        click?.stop()
         monitor?.stop()
         do {
             if let error { throw error }
@@ -181,6 +213,7 @@ final class Recorder: ObservableObject {
     func close() {
         active = false
         timer?.invalidate(); countdown?.cancel()
+        click?.stop()
         monitor?.stop(); mic?.stop()
         camera.stopRecording(); camera.shutdown()
         if !committed { try? FileManager.default.removeItem(at: file) }
@@ -194,6 +227,9 @@ struct Prompt: View {
     let seconds: Double
     let font: Double
     let speed: Double
+    let canPosition: Bool
+    @State private var manual: CGFloat = 0
+    @GestureState private var drag: CGFloat = 0
     @State private var textHeight: CGFloat = 0
     var body: some View {
         GeometryReader { geo in
@@ -206,9 +242,16 @@ struct Prompt: View {
                     Color.clear.onAppear { textHeight = size.size.height }
                         .onChange(of: size.size.height) { _, new in textHeight = new }
                 })
-                .offset(y: -min(CGFloat(seconds * speed), max(0, textHeight - geo.size.height)))
+                .offset(y: -min(max(0, manual - drag + CGFloat(seconds * speed)), max(0, textHeight - geo.size.height)))
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                .contentShape(Rectangle())
+                .gesture(DragGesture().updating($drag) { value, state, _ in
+                    if canPosition { state = value.translation.height }
+                }.onEnded { value in
+                    if canPosition { manual = min(max(0, manual - value.translation.height), max(0, textHeight - geo.size.height)) }
+                })
         }
-        .padding(12).frame(height: 180)
+        .padding(8).frame(maxHeight: .infinity)
         .background(.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 14)).clipped()
         .accessibilityLabel(lyrics)
     }
@@ -232,15 +275,15 @@ struct CaptureScreen: View {
             }
             VStack(spacing: 12) {
                 if !pass.song.lyrics.isEmpty {
-                    Prompt(lyrics: pass.song.lyrics, seconds: recorder.seconds, font: pass.song.font, speed: pass.song.speed)
+                    Prompt(lyrics: pass.song.lyrics, seconds: recorder.promptSeconds, font: pass.song.font, speed: pass.song.speed, canPosition: recorder.phase == .ready)
                         .padding(.top, pass.song.promptY)
                 }
-                Spacer()
+                if pass.song.lyrics.isEmpty { Spacer() }
                 if case .counting(let n) = recorder.phase {
                     Text("\(n)").font(.system(size: 80, weight: .bold, design: .rounded))
                 }
                 VStack(spacing: 10) {
-                    Text(pass.lane.title).font(.headline)
+                    Text(pass.reference ? "Опорная строка" : pass.lane.title).font(.headline)
                     Text("Вход · \(routes.inputName)\nВыход · \(routes.outputName)")
                         .font(.caption).multilineTextAlignment(.center)
                     ProgressView(value: recorder.level).tint(.green).accessibilityLabel("Уровень микрофона")
@@ -270,5 +313,31 @@ struct CaptureScreen: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in recorder.interrupted() }
+    }
+}
+
+private enum ClickTrack {
+    static func make(bpm: Double, anchor: Double, start: Double) throws -> AVAudioPlayer {
+        let rate = 24000.0
+        let period = 60 / bpm
+        let length = Int((period * rate).rounded())
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(length)),
+              let data = buffer.floatChannelData?[0] else { throw StudioError.message("Ошибка метронома.") }
+        buffer.frameLength = AVAudioFrameCount(length)
+        data.update(repeating: 0, count: length)
+        let phase = (anchor-start).truncatingRemainder(dividingBy: period)
+        let first = Int(((phase < 0 ? phase+period : phase)*rate).rounded())
+        for i in 0..<480 {
+            let time = Double(i)/rate
+            data[(first+i)%length] = Float(0.28 * sin(time*8200) * exp(-time*170))
+        }
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".caf")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        do { let file = try AVAudioFile(forWriting: tmp, settings: format.settings); try file.write(from: buffer) }
+        let player = try AVAudioPlayer(data: Data(contentsOf: tmp))
+        player.numberOfLoops = -1
+        player.prepareToPlay()
+        return player
     }
 }

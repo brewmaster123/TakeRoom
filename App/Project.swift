@@ -33,16 +33,34 @@ enum Look: String, Codable, CaseIterable {
     case natural = "Оригинал", mono = "Чёрно-белый", warm = "Тёплый"
 }
 
+struct BeatCut: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var start: Double
+    var end: Double
+}
+struct VoiceFX: Codable, Equatable {
+    var compression = 0.0
+    var low = 0.0
+    var mid = 0.0
+    var high = 0.0
+    var drive = 0.0
+    var blend = 0.5
+}
 struct Strip: Codable, Equatable {
     var gain: Double
     var muted = false
     var shiftMS = 0
     var room = 0.0
+    var effects: VoiceFX?
 }
 
 struct Beat: Codable, Equatable {
     var file: String
     var name: String
+    var bpm: Double?
+    var anchor: Double?
+    var keyName: String?
+    var analyzed: Bool?
     var duration: Double
 }
 
@@ -62,6 +80,9 @@ struct Take: Identifiable, Codable, Equatable {
     var duration: Double
     var back1: Recording?
     var back2: Recording?
+    var duck: Double?
+    var density: Double?
+    var cuts: [BeatCut]?
     var look = Look.natural
     var strips = [Lane.beat: Strip(gain: 0.65), .lead: Strip(gain: 1),
                   .back1: Strip(gain: 0.45), .back2: Strip(gain: 0.45)]
@@ -76,6 +97,14 @@ struct Take: Identifiable, Codable, Equatable {
     }
 }
 
+struct Guide: Codable, Equatable {
+    var recording: Recording
+    var beatFile: String
+    var beatStart: Double
+    var duration: Double
+    var beatDelay: Double?
+}
+
 struct Song: Identifiable, Codable {
     var id = UUID()
     var title = "Новый проект"
@@ -83,6 +112,8 @@ struct Song: Identifiable, Codable {
     var beat: Beat?
     var start = 0.0
     var target = 60.0
+    var guide: Guide?
+    var metronome: Bool?
     var font = 27.0
     var speed = 32.0
     var promptY = 16.0

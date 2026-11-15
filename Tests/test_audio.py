@@ -103,5 +103,114 @@ class AudioTests(unittest.TestCase):
         self.assertNotEqual(self.dsp.tr_pack(os.fsencode(self.root), os.fsencode(archive)), 0)
         self.assertFalse(archive.exists())
 
+    def test_production_mix_with_cut_and_acapella(self):
+        effects = (C.c_float * 32)(*([1,0,0,1,1,1,0,0]*4))
+        cuts = (C.c_int64*2)(1000,3000)
+        self.put(0,0,[1000]*4000)
+        self.put(1,0,[2000]*4000)
+        result = self.dsp.tr_produce(os.fsencode(self.root), C.c_int64(FPS), effects,
+                                    C.c_float(0),C.c_float(0),cuts,1,1)
+        self.assertEqual(result,0)
+        self.assertEqual(self.pcm("Master.wav")[2000],2000)
+        self.assertEqual(self.pcm("Master.wav")[3500],3000)
+        self.assertEqual(self.pcm("processed-01-beat.wav")[2000],0)
+        self.assertEqual(self.pcm("Acapella.wav")[3500],2000)
+        for name in NAMES:
+            (self.root/("processed-"+name)).replace(self.root/name)
+        (self.root/"00-video.mp4").write_bytes(b"video")
+        archive=self.root/"processed.zip"
+        self.assertEqual(self.dsp.tr_pack_processed(os.fsencode(self.root),os.fsencode(archive)),0)
+        with zipfile.ZipFile(archive) as z:
+            self.assertIsNone(z.testzip())
+            self.assertEqual(len(z.namelist()),7)
+
+    def test_estimated_beat_and_silence(self):
+        class Grid(C.Structure):
+            _fields_=[("tempo",C.c_double),("phase",C.c_double),("root",C.c_int),("minor",C.c_int)]
+        self.dsp.tr_analyze.restype=Grid
+        self.dsp.tr_analyze.argtypes=[C.POINTER(C.c_float),C.c_int,C.c_double]
+        signal=(C.c_float * 96000)()
+        silent=self.dsp.tr_analyze(signal,len(signal),8000)
+        self.assertEqual((silent.tempo,silent.root),(0,-1))
+        for i in range(len(signal)):
+            phase=i%4000
+            if phase<200:
+                signal[i]=math.sin(phase*0.8)*math.exp(-phase/60)
+        grid=self.dsp.tr_analyze(signal,len(signal),8000)
+        self.assertAlmostEqual(grid.tempo,120,delta=2)
+
+    def test_live_processor_matches_export_and_moves_backing(self):
+        effects=(C.c_float*32)(*([1,0.1,0.2,1,1,1,0.1,0.3]*4))
+        self.put(0,0,[int(5000*math.sin(i*0.1)) for i in range(FPS)])
+        self.put(1,200,[14000]*1000)
+        self.put(2,100,[10000]*400)
+        cuts=(C.c_int64*2)(1200,2700)
+        self.dsp.tr_produce(os.fsencode(self.root),C.c_int64(FPS),effects,C.c_float(0.6),C.c_float(0.4),cuts,1,0)
+        expected=self.pcm('Master.wav')
+        self.dsp.tr_live_open.restype=C.c_void_p
+        self.dsp.tr_live_open.argtypes=[C.c_char_p,C.c_int64]
+        self.dsp.tr_live_update.argtypes=[C.c_void_p,C.c_void_p,C.c_void_p,C.c_float,C.c_float,C.c_void_p,C.c_int]
+        self.dsp.tr_live_transport.argtypes=[C.c_void_p,C.c_int64,C.c_int,C.c_int,C.c_int64,C.c_int64]
+        self.dsp.tr_live_render.argtypes=[C.c_void_p,C.POINTER(C.c_float),C.POINTER(C.c_float),C.c_int]
+        self.dsp.tr_live_close.argtypes=[C.c_void_p]
+        handle=self.dsp.tr_live_open(os.fsencode(self.root),FPS)
+        self.assertTrue(handle)
+        try:
+            shifts=(C.c_int64*4)(0,0,0,0)
+            self.dsp.tr_live_update(handle,effects,shifts,0.6,0.4,cuts,1)
+            self.dsp.tr_live_transport(handle,0,1,0,0,FPS)
+            left=(C.c_float*FPS)();right=(C.c_float*FPS)()
+            self.dsp.tr_live_render(handle,left,right,FPS)
+            self.assertEqual([round(x*32768) for x in left],expected)
+            # Isolate and move back 1 by 1000 frames without rebuilding files.
+            isolated=(C.c_float*32)(*([0,0,0,1,1,1,0,0]*4))
+            isolated[16]=1
+            shifts[2]=1000
+            self.dsp.tr_live_update(handle,isolated,shifts,0,0,None,0)
+            self.dsp.tr_live_transport(handle,0,1,0,0,FPS)
+            self.dsp.tr_live_render(handle,left,right,FPS)
+            onset=next(i for i,x in enumerate(left) if abs(x)>0.1)
+            self.assertEqual(onset,1100)
+        finally: self.dsp.tr_live_close(handle)
+
+    def test_reference_delay_match_and_silence_rejection(self):
+        import random
+        class Match(C.Structure):
+            _fields_=[('lag',C.c_int),('score',C.c_double),('margin',C.c_double)]
+        self.dsp.tr_match.argtypes=[C.POINTER(C.c_float),C.c_int,C.POINTER(C.c_float),C.c_int,C.c_int,C.c_int,C.c_int]
+        self.dsp.tr_match.restype=Match
+        rng=random.Random(42)
+        ref=(C.c_float*1000)(*[rng.uniform(-1,1) for _ in range(1000)])
+        recorded=(C.c_float*1200)()
+        for i in range(1000): recorded[i+125]=ref[i]+rng.uniform(-0.15,0.15)
+        result=self.dsp.tr_match(ref,1000,recorded,1200,-150,150,20)
+        self.assertEqual(result.lag,125)
+        self.assertGreater(result.score,0.97)
+        silent=(C.c_float*1000)()
+        self.assertEqual(self.dsp.tr_match(ref,1000,silent,1000,-150,150,20).score,0)
+
+    def test_tempo_full_supported_range(self):
+        class Grid(C.Structure):
+            _fields_=[('tempo',C.c_double),('phase',C.c_double),('root',C.c_int),('minor',C.c_int)]
+        self.dsp.tr_analyze.restype=Grid
+        self.dsp.tr_analyze.argtypes=[C.POINTER(C.c_float),C.c_int,C.c_double]
+        rate=8000
+        for bpm in [60,70,120,157,164,200]:
+            signal=(C.c_float*(rate*24))()
+            beat=60*rate/bpm
+            for i in range(len(signal)):
+                phase=i%beat
+                if phase<200: signal[i]=math.sin(phase*0.8)*math.exp(-phase/60)
+            grid=self.dsp.tr_analyze(signal,len(signal),rate)
+            self.assertAlmostEqual(grid.tempo,bpm,delta=2,msg=str(bpm))
+
+    def test_long_fragment_header(self):
+        path=self.root/'long.wav'
+        frames=697*FPS
+        self.assertEqual(self.dsp.tr_blank_wave(os.fsencode(path),frames),0)
+        with wave.open(str(path)) as wav:
+            self.assertEqual(wav.getnframes(),frames)
+            self.assertEqual(wav.getframerate(),FPS)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
