@@ -24,10 +24,13 @@ enum Render {
         defer { if !complete { try? files.removeItem(at: result) } }
         let frames = Int64((take.duration * rate).rounded(.down))
         guard frames > 0 else { throw StudioError.message("Слишком короткий дубль.") }
+        guard Lane.allCases.count == Int(TR_LANE_COUNT) else {
+            throw StudioError.message("Не совпадает число дорожек в микшере.")
+        }
         var effects = [TREffect]()
         for lane in Lane.allCases {
             try Task.checkCancellation()
-            let strip = take.strips[lane] ?? Strip(gain: 1)
+            let strip = take.strips[lane] ?? lane.defaultStrip
             let wav = scratch.appendingPathComponent(lane.wav)
             guard tr_blank_wave(wav.path, frames) == 0 else {
                 throw StudioError.message("Не удалось создать WAV. Проверь свободное место.")
@@ -66,7 +69,8 @@ enum Render {
             }
             try await movie(take, folder: folder, audio: nil, frames: frames,
                             to: scratch.appendingPathComponent("00-video.mp4"))
-            guard tr_pack_processed(scratch.path, result.path) == 0 else {
+            let extras = try stageExtraVideos(take, folder: folder, scratch: scratch)
+            guard tr_pack_processed(scratch.path, result.path, extras) == 0 else {
                 throw StudioError.message("Не удалось собрать архив Stems.")
             }
         case .audioMix, .monitor, .movie:
@@ -78,9 +82,22 @@ enum Render {
         return result
     }
 
+    private static func stageExtraVideos(_ take: Take, folder: URL, scratch: URL) throws -> UInt32 {
+        var slots: UInt32 = 0
+        for slot in Take.extraVideoSlots {
+            guard let video = take.extraVideos?[slot], let relative = tr_extra_movie_path(Int32(slot)) else { continue }
+            try Task.checkCancellation()
+            let destination = scratch.appendingPathComponent(String(cString: relative))
+            try files.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try files.createSymbolicLink(at: destination, withDestinationURL: folder.appendingPathComponent(video.file))
+            slots |= 1 << slot
+        }
+        return slots
+    }
+
     static func effects(_ take: Take) -> [TREffect] {
         Lane.allCases.map { lane in
-            let strip = take.strips[lane] ?? Strip(gain: 1)
+            let strip = take.strips[lane] ?? lane.defaultStrip
             let fx = strip.effects ?? VoiceFX()
             func db(_ value: Double) -> Float { Float(pow(10,value/20)) }
             return TREffect(gain: strip.muted ? 0 : Float(strip.gain), room: Float(strip.room),

@@ -8,8 +8,6 @@ struct ReferenceAlignment: View {
     let apply: (Int,Double?) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var referenceWave = [Float]()
-    @State private var beatWave = [Float]()
-    @State private var beatMark = 0.0
     @State private var cleanWave = [Float]()
     @State private var referenceMark = 0.0
     @State private var cleanMark = 0.0
@@ -40,50 +38,48 @@ struct ReferenceAlignment: View {
                         Button("Проверить предложенное положение") { apply(suggestion.milliseconds+(take.strips[.lead]?.shiftMS ?? 0),beatDelay); dismiss() }
                     }
                 }
-                Section("Отметить одно и то же слово") {
-                    Text("Выбери начало одного слова на обеих волнах. Прослушивание начнётся с отмеченного места.")
-                    Slider(value: $rangeStart,in: 0...max(0.001,duration-span))
-                    Slider(value: $width,in: min(0.5,duration)...max(0.5,duration))
-                    Text("Опорная строка")
-                    marker(reference: true)
-                    Text("Основной дубль")
-                    marker(reference: false)
-                    Button("Послушать опорную строку") { listen(reference: true,at: referenceMark) }
-                    Button("Послушать основной дубль") { listen(reference: false,at: cleanMark) }
-                    DisclosureGroup("Уточнить положение бита в опорной записи") {
-                        Text("На верхней опорной волне отметь узнаваемый удар бита. На волне ниже отметь тот же удар оригинала.")
-                        GeometryReader { geo in
-                            WaveShape(peaks: beatWave,duration: duration,start: rangeStart,span: span,position: beatMark,color: .yellow)
-                                .contentShape(Rectangle()).onTapGesture { point in
-                                    beatMark = min(duration,max(0,rangeStart+point.x/geo.size.width*span))
-                                }
-                        }.frame(height: 80)
-                        Button("Сопоставить этот удар") { beatDelay = referenceMark-beatMark }
-                    }
-                    if beatDelay == nil { Text("Для ручной привязки сначала сопоставь удар бита в разделе выше.") }
-                    Button("Применить сдвиг · \(value) мс") { apply(value+(take.strips[.lead]?.shiftMS ?? 0),beatDelay); dismiss() }.disabled(beatDelay == nil || busy)
+                if beatDelay != nil {
+                    wordAlignment
                 }
             }.navigationTitle("Опорная строка")
                 .toolbar { Button("Закрыть") { dismiss() } }
         }
-        .task {
-            defer { busy = false }
-            do {
-                let ref = try await ReferenceAnalysis.samples(folder.appendingPathComponent(guide.recording.file),origin: guide.recording.origin,duration: duration)
-                let main = try await ReferenceAnalysis.samples(folder.appendingPathComponent(take.video.file),origin: take.video.origin,duration: duration)
-                let instrumental = try await ReferenceAnalysis.samples(folder.appendingPathComponent(take.beat.file),origin: guide.beatStart,duration: duration)
-                beatWave = peaks(instrumental)
-                referenceWave = peaks(ref); cleanWave = peaks(main)
-                beatDelay = guide.beatDelay
-                var measured = guide
-                if beatDelay == nil {
-                    measured.beatDelay = try await ReferenceAnalysis.locateBeat(guide,beat: take.beat,folder: folder)
-                    beatDelay = measured.beatDelay
-                }
-                suggestion = try await ReferenceAnalysis.suggestion(measured,take: take,folder: folder)
-                if suggestion == nil { message = "Выбери начало одного слова на обеих записях для точной привязки." }
-            } catch { if !Task.isCancelled { message = error.localizedDescription } }
-        }.onDisappear { audio?.stop() }
+        .task { await analyze() }
+        .onDisappear { audio?.stop() }
+    }
+    private var wordAlignment: some View {
+        Section("Отметить одно и то же слово") {
+            Text("Выбери начало одного слова на обеих волнах. Прослушивание начнётся с отмеченного места.")
+            Slider(value: $rangeStart,in: 0...max(0.001,duration-span))
+            Slider(value: $width,in: min(0.5,duration)...max(0.5,duration))
+            Text("Опорная строка")
+            marker(reference: true)
+            Text("Основной дубль")
+            marker(reference: false)
+            Button("Послушать опорную строку") { listen(reference: true,at: referenceMark) }
+            Button("Послушать основной дубль") { listen(reference: false,at: cleanMark) }
+            Button("Применить сдвиг · \(value) мс") { apply(value+(take.strips[.lead]?.shiftMS ?? 0),beatDelay); dismiss() }.disabled(beatDelay == nil || busy)
+        }
+    }
+    private func analyze() async {
+        defer { busy = false }
+        do {
+            let ref = try await ReferenceAnalysis.samples(folder.appendingPathComponent(guide.recording.file),origin: guide.recording.origin,duration: duration)
+            let main = try await ReferenceAnalysis.samples(folder.appendingPathComponent(take.video.file),origin: take.video.origin,duration: duration)
+            referenceWave = peaks(ref); cleanWave = peaks(main)
+            beatDelay = guide.beatDelay
+            var measured = guide
+            if beatDelay == nil {
+                measured.beatDelay = try await ReferenceAnalysis.locateBeat(guide,beat: take.beat,folder: folder)
+                beatDelay = measured.beatDelay
+            }
+            suggestion = try await ReferenceAnalysis.suggestion(measured,take: take,folder: folder)
+            if beatDelay == nil {
+                message = "Бит на опорной записи не распознан. Подгони дорожки на слух в секвенсоре."
+            } else if suggestion == nil {
+                message = "Отметь начало одного слова на обеих записях или подгони дорожки на слух в секвенсоре."
+            }
+        } catch { if !Task.isCancelled { message = error.localizedDescription } }
     }
     private func peaks(_ samples: [Float]) -> [Float] {
         stride(from: 0,to: samples.count,by: 80).map { i in samples[i..<min(samples.count,i+80)].map { abs($0) }.max() ?? 0 }

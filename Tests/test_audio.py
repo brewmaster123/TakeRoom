@@ -13,6 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 NAMES = ["01-beat.wav", "02-lead.wav", "03-back-1.wav", "04-back-2.wav"]
+DOUBLE_NAMES = ["05-double-1.wav", "06-double-2.wav"]
+PRODUCTION_NAMES = NAMES + DOUBLE_NAMES
 FPS = 44100
 
 class Window(C.Structure):
@@ -31,6 +33,7 @@ class AudioTests(unittest.TestCase):
         cls.dsp.tr_window.restype = Window
         cls.dsp.tr_blank_wave.argtypes = [C.c_char_p, C.c_int64]
         cls.dsp.tr_pack.argtypes = [C.c_char_p]*2
+        cls.dsp.tr_pack_processed.argtypes = [C.c_char_p, C.c_char_p, C.c_uint]
         cls.dsp.tr_mix.argtypes = [C.c_char_p, C.c_char_p, C.c_int64, C.POINTER(C.c_float), C.POINTER(C.c_float)]
 
     @classmethod
@@ -41,13 +44,13 @@ class AudioTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        for name in NAMES:
+        for name in PRODUCTION_NAMES:
             self.assertEqual(self.dsp.tr_blank_wave(os.fsencode(self.root/name), FPS), 0)
 
     def put(self, lane, start, samples):
         w = self.dsp.tr_window(start, len(samples), FPS)
         if w.count:
-            with (self.root/NAMES[lane]).open('r+b') as f:
+            with (self.root/PRODUCTION_NAMES[lane]).open('r+b') as f:
                 f.seek(44 + 4 * w.start)
                 f.write(b''.join(struct.pack('<hh', x, x) for x in samples[w.skip:w.skip+w.count]))
 
@@ -104,25 +107,46 @@ class AudioTests(unittest.TestCase):
         self.assertFalse(archive.exists())
 
     def test_production_mix_with_cut_and_acapella(self):
-        effects = (C.c_float * 32)(*([1,0,0,1,1,1,0,0]*4))
+        effects = (C.c_float * 48)(*([1,0,0,1,1,1,0,0]*6))
         cuts = (C.c_int64*2)(1000,3000)
         self.put(0,0,[1000]*4000)
         self.put(1,0,[2000]*4000)
+        self.put(4, 2000, [700])
+        self.put(5, 2500, [900])
         result = self.dsp.tr_produce(os.fsencode(self.root), C.c_int64(FPS), effects,
                                     C.c_float(0),C.c_float(0),cuts,1,1)
         self.assertEqual(result,0)
-        self.assertEqual(self.pcm("Master.wav")[2000],2000)
+        self.assertEqual(self.pcm("Master.wav")[2000],2700)
         self.assertEqual(self.pcm("Master.wav")[3500],3000)
         self.assertEqual(self.pcm("processed-01-beat.wav")[2000],0)
         self.assertEqual(self.pcm("Acapella.wav")[3500],2000)
-        for name in NAMES:
+        self.assertEqual(self.pcm("Acapella.wav")[2500], 2900)
+        self.assertEqual(self.pcm("processed-" + DOUBLE_NAMES[0])[2000], 700)
+        for name in PRODUCTION_NAMES:
             (self.root/("processed-"+name)).replace(self.root/name)
         (self.root/"00-video.mp4").write_bytes(b"video")
         archive=self.root/"processed.zip"
-        self.assertEqual(self.dsp.tr_pack_processed(os.fsencode(self.root),os.fsencode(archive)),0)
+        self.assertEqual(self.dsp.tr_pack_processed(os.fsencode(self.root),os.fsencode(archive),0),0)
         with zipfile.ZipFile(archive) as z:
             self.assertIsNone(z.testzip())
-            self.assertEqual(len(z.namelist()),7)
+            self.assertCountEqual(z.namelist(), PRODUCTION_NAMES + ["00-video.mp4", "Master.wav", "Acapella.wav"])
+
+    def test_zip_preserves_selected_extra_video_slots_and_unicode(self):
+        for name in ["00-video.mp4", "Master.wav", "Acapella.wav"]:
+            (self.root / name).write_bytes(b"media")
+        extras = self.root / "Доп. видео для монтажа"
+        extras.mkdir()
+        (extras / "02.mov").write_bytes(b"original video with audio")
+        (extras / "04.mov").write_bytes(b"another original video")
+        archive = self.root / "extras.zip"
+        self.assertEqual(self.dsp.tr_pack_processed(os.fsencode(self.root), os.fsencode(archive), 0b1010), 0)
+        with zipfile.ZipFile(archive) as zipped:
+            self.assertIsNone(zipped.testzip())
+            videos = [name for name in zipped.namelist() if name.endswith(".mov")]
+            self.assertEqual(videos, ["Доп. видео для монтажа/02.mov", "Доп. видео для монтажа/04.mov"])
+            self.assertEqual(zipped.read(videos[0]), b"original video with audio")
+        self.assertNotEqual(self.dsp.tr_pack_processed(os.fsencode(self.root), os.fsencode(archive), 0b1111), 0)
+        self.assertFalse(archive.exists())
 
     def test_estimated_beat_and_silence(self):
         class Grid(C.Structure):
@@ -140,10 +164,11 @@ class AudioTests(unittest.TestCase):
         self.assertAlmostEqual(grid.tempo,120,delta=2)
 
     def test_live_processor_matches_export_and_moves_backing(self):
-        effects=(C.c_float*32)(*([1,0.1,0.2,1,1,1,0.1,0.3]*4))
+        effects=(C.c_float*48)(*([1,0.1,0.2,1,1,1,0.1,0.3]*6))
         self.put(0,0,[int(5000*math.sin(i*0.1)) for i in range(FPS)])
         self.put(1,200,[14000]*1000)
         self.put(2,100,[10000]*400)
+        self.put(5, 300, [9500]*400)
         cuts=(C.c_int64*2)(1200,2700)
         self.dsp.tr_produce(os.fsencode(self.root),C.c_int64(FPS),effects,C.c_float(0.6),C.c_float(0.4),cuts,1,0)
         expected=self.pcm('Master.wav')
@@ -156,21 +181,21 @@ class AudioTests(unittest.TestCase):
         handle=self.dsp.tr_live_open(os.fsencode(self.root),FPS)
         self.assertTrue(handle)
         try:
-            shifts=(C.c_int64*4)(0,0,0,0)
+            shifts=(C.c_int64*6)()
             self.dsp.tr_live_update(handle,effects,shifts,0.6,0.4,cuts,1)
             self.dsp.tr_live_transport(handle,0,1,0,0,FPS)
             left=(C.c_float*FPS)();right=(C.c_float*FPS)()
             self.dsp.tr_live_render(handle,left,right,FPS)
             self.assertEqual([round(x*32768) for x in left],expected)
-            # Isolate and move back 1 by 1000 frames without rebuilding files.
-            isolated=(C.c_float*32)(*([0,0,0,1,1,1,0,0]*4))
-            isolated[16]=1
-            shifts[2]=1000
+            # Isolate and move double 2 by 1000 frames without rebuilding files.
+            isolated=(C.c_float*48)(*([0,0,0,1,1,1,0,0]*6))
+            isolated[40]=1
+            shifts[5]=1000
             self.dsp.tr_live_update(handle,isolated,shifts,0,0,None,0)
             self.dsp.tr_live_transport(handle,0,1,0,0,FPS)
             self.dsp.tr_live_render(handle,left,right,FPS)
             onset=next(i for i,x in enumerate(left) if abs(x)>0.1)
-            self.assertEqual(onset,1100)
+            self.assertEqual(onset,1300)
         finally: self.dsp.tr_live_close(handle)
 
     def test_reference_delay_match_and_silence_rejection(self):

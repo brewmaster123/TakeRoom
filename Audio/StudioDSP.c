@@ -6,8 +6,16 @@
 #include <string.h>
 #include <zlib.h>
 
-static const char *names[] = {"01-beat.wav",  "02-lead.wav", "03-back-1.wav", "04-back-2.wav",
-                              "00-video.mp4", "Master.wav",  "Acapella.wav"};
+static const char *const names[TR_LANE_COUNT] = {
+    "01-beat.wav", "02-lead.wav", "03-back-1.wav", "04-back-2.wav", "05-double-1.wav", "06-double-2.wav"
+};
+#define EXTRA_DIRECTORY "Доп. видео для монтажа/"
+static const char *const extra_names[TR_EXTRA_MOVIE_COUNT] = {
+    EXTRA_DIRECTORY "01.mov", EXTRA_DIRECTORY "02.mov", EXTRA_DIRECTORY "03.mov", EXTRA_DIRECTORY "04.mov"
+};
+const char *tr_extra_movie_path(int slot) {
+    return slot >= 0 && slot < TR_EXTRA_MOVIE_COUNT ? extra_names[slot] : NULL;
+}
 static FILE *track(const char *dir, int lane) {
     size_t n = strlen(dir) + strlen(names[lane]) + 2;
     char *path = malloc(n);
@@ -166,7 +174,7 @@ static float follow(float current, float peak) {
 #include <unistd.h>
 
 typedef struct {
-    VoiceState voices[4];
+    VoiceState voices[TR_LANE_COUNT];
     float detector, bus, vocalBus;
 } MixState;
 
@@ -183,7 +191,7 @@ static float limit_bus(float x, float envelope, float density) {
 }
 
 static void process_frame(MixState *state, const TREffect *fx, float duck, float density, const TRCut *cuts,
-                          int ncuts, int64_t frame, float samples[4][2], float master[2], float acapella[2]) {
+                          int ncuts, int64_t frame, float samples[TR_LANE_COUNT][2], float master[2], float acapella[2]) {
     float sum[2] = {0}, voice[2] = {0};
     float beatGain = 1;
     for (int i = 0; i < ncuts; i++) {
@@ -192,8 +200,8 @@ static void process_frame(MixState *state, const TREffect *fx, float duck, float
         float distance = (float)fmin(frame - cuts[i].start, cuts[i].end - 1 - frame);
         beatGain = fminf(beatGain, fmaxf(0, 1 - distance / 120));
     }
-    for (int k = 1; k <= 4; k++) {
-        int t = k % 4;
+    for (int k = 1; k <= TR_LANE_COUNT; k++) {
+        int t = k % TR_LANE_COUNT;
         VoiceState *v = &state->voices[t];
         const TREffect *e = &fx[t];
         float peak = fmaxf(fabsf(samples[t][0]), fabsf(samples[t][1])) / 32768;
@@ -237,11 +245,11 @@ int tr_produce(const char *dir, int64_t frames, const TREffect *fx, float duck, 
     if (frames <= 0 || frames > (UINT32_MAX - 36u) / 4u)
         return -1;
     MixState *state = calloc(1, sizeof(MixState));
-    FILE *input[4] = {0}, *stem[4] = {0}, *master = NULL, *vocals = NULL;
+    FILE *input[TR_LANE_COUNT] = {0}, *stem[TR_LANE_COUNT] = {0}, *master = NULL, *vocals = NULL;
     int ok = 0;
     if (!state)
         return -1;
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < TR_LANE_COUNT; k++) {
         input[k] = track(dir, k);
         if (!input[k] || fseek(input[k], 44, SEEK_SET))
             goto done;
@@ -266,32 +274,32 @@ int tr_produce(const char *dir, int64_t frames, const TREffect *fx, float duck, 
     }
     for (int64_t pos = 0; pos < frames; pos += blockSize) {
         size_t n = (size_t)(frames - pos < blockSize ? frames - pos : blockSize);
-        int16_t pcm[4][2 * blockSize], mix[2 * blockSize], aca[2 * blockSize];
-        for (int k = 0; k < 4; k++)
+        int16_t pcm[TR_LANE_COUNT][2 * blockSize], mix[2 * blockSize], aca[2 * blockSize];
+        for (int k = 0; k < TR_LANE_COUNT; k++)
             if (fread(pcm[k], 4, n, input[k]) != n)
                 goto done;
         for (size_t i = 0; i < n; i++) {
-            float samples[4][2], main[2], voice[2];
-            for (int k = 0; k < 4; k++)
+            float samples[TR_LANE_COUNT][2], main[2], voice[2];
+            for (int k = 0; k < TR_LANE_COUNT; k++)
                 for (int ch = 0; ch < 2; ch++)
                     samples[k][ch] = pcm[k][2 * i + ch];
             process_frame(state, fx, duck, density, cuts, ncuts, pos + (int64_t)i, samples, main, voice);
             for (int ch = 0; ch < 2; ch++) {
                 mix[2 * i + ch] = (int16_t)main[ch];
                 aca[2 * i + ch] = (int16_t)voice[ch];
-                for (int k = 0; k < 4; k++)
+                for (int k = 0; k < TR_LANE_COUNT; k++)
                     pcm[k][2 * i + ch] = (int16_t)samples[k][ch];
             }
         }
         if (fwrite(mix, 4, n, master) != n || (vocals && fwrite(aca, 4, n, vocals) != n))
             goto done;
-        for (int k = 0; k < 4; k++)
+        for (int k = 0; k < TR_LANE_COUNT; k++)
             if (stem[k] && fwrite(pcm[k], 4, n, stem[k]) != n)
                 goto done;
     }
     ok = 1;
 done:
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < TR_LANE_COUNT; k++) {
         if (input[k])
             fclose(input[k]);
         if (stem[k] && fclose(stem[k]))
@@ -308,11 +316,11 @@ done:
 struct TRLive {
     pthread_mutex_t mutex;
     MixState state;
-    const unsigned char *maps[4];
-    size_t sizes[4];
-    int64_t shifts[4], previousShifts[4], position, frames, loopStart, loopEnd;
-    int fade[4];
-    TREffect fx[4];
+    const unsigned char *maps[TR_LANE_COUNT];
+    size_t sizes[TR_LANE_COUNT];
+    int64_t shifts[TR_LANE_COUNT], previousShifts[TR_LANE_COUNT], position, frames, loopStart, loopEnd;
+    int fade[TR_LANE_COUNT];
+    TREffect fx[TR_LANE_COUNT];
     TRCut *cuts;
     int ncuts, playing, loop;
     float duck, density;
@@ -321,7 +329,7 @@ struct TRLive {
 void tr_live_close(TRLive *live) {
     if (!live)
         return;
-    for (int k = 0; k < 4; k++)
+    for (int k = 0; k < TR_LANE_COUNT; k++)
         if (live->maps[k])
             munmap((void *)live->maps[k], live->sizes[k]);
     free(live->cuts);
@@ -334,7 +342,7 @@ TRLive *tr_live_open(const char *dir, int64_t frames) {
         return NULL;
     pthread_mutex_init(&live->mutex, NULL);
     live->frames = frames;
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < TR_LANE_COUNT; k++) {
         FILE *file = track(dir, k);
         struct stat info;
         if (!file) {
@@ -367,7 +375,7 @@ void tr_live_update(TRLive *live, const TREffect *fx, const int64_t *shifts, flo
         memcpy(copy, cuts, (size_t)ncuts * sizeof(TRCut));
     pthread_mutex_lock(&live->mutex);
     memcpy(live->fx, fx, sizeof(live->fx));
-    for (int k = 0; k < 4; k++)
+    for (int k = 0; k < TR_LANE_COUNT; k++)
         if (live->shifts[k] != shifts[k]) {
             live->previousShifts[k] = live->shifts[k];
             live->fade[k] = 128;
@@ -414,8 +422,8 @@ void tr_live_render(TRLive *live, float *left, float *right, int count) {
             live->position = live->loopStart;
             memset(&live->state, 0, sizeof(live->state));
         }
-        float samples[4][2] = {{0}}, master[2], acapella[2];
-        for (int k = 0; k < 4; k++) {
+        float samples[TR_LANE_COUNT][2] = {{0}}, master[2], acapella[2];
+        for (int k = 0; k < TR_LANE_COUNT; k++) {
             int64_t frame = live->position - live->shifts[k];
             int64_t old = live->position - live->previousShifts[k];
             const int16_t *pcm = (const int16_t *)(live->maps[k] + 44);
@@ -444,22 +452,23 @@ void tr_live_render(TRLive *live, float *left, float *right, int count) {
 typedef struct {
     uint32_t crc, size, offset;
 } Entry;
-static int pack(const char *directory, const char *out, int count) {
-    Entry entries[7] = {0};
+static int pack(const char *directory, const char *out, const char *const paths[], int count) {
+    Entry entries[TR_LANE_COUNT + 3 + TR_EXTRA_MOVIE_COUNT] = {0};
+    const uint16_t utf8 = 1u << 11;
     FILE *zip = fopen(out, "wb"), *src = NULL;
     unsigned char buf[65536];
     int ok = 0;
     if (!zip)
         return -1;
     for (int i = 0; i < count; i++) {
-        size_t len = strlen(names[i]), got;
+        size_t len = strlen(paths[i]), got;
         long off = ftell(zip);
         if (off < 0 || (unsigned long)off > UINT32_MAX)
             goto done;
         entries[i].offset = (uint32_t)off;
         u32(zip, 0x04034b50);
         u16(zip, 20);
-        u16(zip, 0);
+        u16(zip, utf8);
         u16(zip, 0);
         u16(zip, 0);
         u16(zip, 33);
@@ -468,8 +477,8 @@ static int pack(const char *directory, const char *out, int count) {
         u32(zip, 0);
         u16(zip, (uint16_t)len);
         u16(zip, 0);
-        fwrite(names[i], 1, len, zip);
-        src = track(directory, i);
+        fwrite(paths[i], 1, len, zip);
+        src = named_file(directory, paths[i], "rb");
         if (!src)
             goto done;
         while ((got = fread(buf, 1, sizeof(buf), src))) {
@@ -495,11 +504,11 @@ static int pack(const char *directory, const char *out, int count) {
         goto done;
     for (int i = 0; i < count; i++) {
         Entry e = entries[i];
-        size_t len = strlen(names[i]);
+        size_t len = strlen(paths[i]);
         u32(zip, 0x02014b50);
         u16(zip, 20);
         u16(zip, 20);
-        u16(zip, 0);
+        u16(zip, utf8);
         u16(zip, 0);
         u16(zip, 0);
         u16(zip, 33);
@@ -513,7 +522,7 @@ static int pack(const char *directory, const char *out, int count) {
         u16(zip, 0);
         u32(zip, 0);
         u32(zip, e.offset);
-        fwrite(names[i], 1, len, zip);
+        fwrite(paths[i], 1, len, zip);
     }
     long end = ftell(zip);
     if (end < central || (unsigned long)end > UINT32_MAX)
@@ -537,8 +546,23 @@ done:
     return ok ? 0 : -1;
 }
 
-int tr_pack(const char *directory, const char *out) { return pack(directory, out, 5); }
-int tr_pack_processed(const char *directory, const char *out) { return pack(directory, out, 7); }
+int tr_pack(const char *directory, const char *out) {
+    const char *paths[] = {names[0], names[1], names[2], names[3], "00-video.mp4"};
+    return pack(directory, out, paths, sizeof(paths) / sizeof(paths[0]));
+}
+
+int tr_pack_processed(const char *directory, const char *out, unsigned extra_slots) {
+    const char *paths[TR_LANE_COUNT + 3 + TR_EXTRA_MOVIE_COUNT] = {"00-video.mp4"};
+    int count = 1;
+    for (int slot = 0; slot < TR_LANE_COUNT; slot++)
+        paths[count++] = names[slot];
+    paths[count++] = "Master.wav";
+    paths[count++] = "Acapella.wav";
+    for (int slot = 0; slot < TR_EXTRA_MOVIE_COUNT; slot++)
+        if (extra_slots & (1u << slot))
+            paths[count++] = extra_names[slot];
+    return pack(directory, out, paths, count);
+}
 
 // Analyse mono PCM resampled by the caller to about 8 kHz. Windowed FFT supplies
 // both spectral flux (tempo) and a folded pitch-class histogram (key).

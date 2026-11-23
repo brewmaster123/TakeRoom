@@ -9,7 +9,7 @@ typedef struct {
 TRWindow tr_window(int64_t start, int64_t count, int64_t total);
 int tr_blank_wave(const char *path, int64_t frames);
 // Input tracks are canonical 44.1 kHz, 16-bit stereo WAVs produced by tr_blank_wave.
-// Arrays are in beat, lead, backing 1, backing 2 order.
+// Legacy mix arrays are in beat, lead, backing 1, backing 2 order.
 int tr_mix(const char *directory, const char *out, int64_t frames, const float gain[4], const float room[4]);
 int tr_pack(const char *directory, const char *out);
 typedef struct {
@@ -18,9 +18,12 @@ typedef struct {
 typedef struct {
     int64_t start, end;
 } TRCut;
+// Production/live arrays are in beat, lead, backing 1–2, double 1–2 order.
+enum { TR_LANE_COUNT = 6, TR_EXTRA_MOVIE_COUNT = 4 };
 int tr_produce(const char *dir, int64_t frames, const TREffect *fx, float duck, float density,
                const TRCut *cuts, int ncuts, int exportStems);
-int tr_pack_processed(const char *directory, const char *out);
+const char *tr_extra_movie_path(int slot);
+int tr_pack_processed(const char *directory, const char *out, unsigned extra_slots);
 typedef struct {
     double bpm, anchor;
     int root, minor;

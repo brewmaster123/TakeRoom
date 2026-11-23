@@ -3,48 +3,64 @@ import AVFoundation
 import AVKit
 import Photos
 import UniformTypeIdentifiers
+import UIKit
 
 @main
 struct StudioApp: App {
     @StateObject private var shelf = Shelf()
     @StateObject private var routes = Routes()
     var body: some Scene {
-        WindowGroup { Projects().environmentObject(shelf).environmentObject(routes).tint(.mint).preferredColorScheme(.dark) }
+        WindowGroup { Projects().environmentObject(shelf).environmentObject(routes).tint(Night.lime).preferredColorScheme(.dark) }
     }
 }
 
 struct Projects: View {
     @EnvironmentObject var shelf: Shelf
     @State private var path = [UUID]()
+    @AppStorage("TakeRoom.lastOpenedProject") private var recent = ""
+    private var featured: Song? { shelf.songs.first { $0.id.uuidString == recent } ?? shelf.songs.first }
+
     var body: some View {
         NavigationStack(path: $path) {
-            List {
-                Section {
-                    Button { if let id = shelf.create() { path.append(id) } } label: {
-                        Label("Новый проект", systemImage: "plus.circle.fill").font(.headline)
-                    }
-                }
-                Section("Мои проекты") {
-                    ForEach(shelf.songs) { song in
-                        NavigationLink(value: song.id) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(song.title).font(.headline)
-                                Text(song.beat?.name ?? "Выбрать бит").foregroundStyle(.secondary).font(.subheadline)
-                            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    Text("TakeRoom").font(.system(size: 32, weight: .heavy)).italic()
+                        .padding(.vertical, 10).accessibilityAddTraits(.isHeader)
+                    if let featured {
+                        card(featured, featured: true)
+                        ForEach(shelf.songs.filter { $0.id != featured.id }) { song in
+                            card(song, featured: false)
                         }
+                    } else {
+                        ContentUnavailableView("Пока нет проектов", systemImage: "waveform",
+                                               description: Text("Создай проект, чтобы загрузить бит и написать куплет."))
                     }
-                }
+                }.padding(16)
+            }
+            .background(Night.canvas)
+            .safeAreaInset(edge: .bottom) {
+                Button { if let id = shelf.create() { path.append(id) } } label: {
+                    Label("Новый проект", systemImage: "plus")
+                }.buttonStyle(StudioAction()).padding(.horizontal, 16).padding(.vertical, 8).background(Night.canvas)
             }
             .navigationTitle("TakeRoom")
+            .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: UUID.self) { id in
                 if let index = shelf.songs.firstIndex(where: { $0.id == id }) {
                     Editor(song: $shelf.songs[index], folder: shelf.folder(id))
+                        .onAppear { recent = id.uuidString }
                 }
             }
         }
         .alert("Проекты", isPresented: Binding(get: { shelf.error != nil }, set: { if !$0 { shelf.error = nil } })) {
             Button("ОК") { shelf.error = nil }
         } message: { Text(shelf.error ?? "") }
+    }
+
+    private func card(_ song: Song, featured: Bool) -> some View {
+        NavigationLink(value: song.id) {
+            ProjectCard(song: song, folder: shelf.folder(song.id), featured: featured)
+        }.buttonStyle(.plain)
     }
 }
 
@@ -60,7 +76,7 @@ final class LoopPlayer: ObservableObject {
         audio.currentTime = start
         guard audio.play() else { throw StudioError.message("Не удалось включить бит.") }
         player = audio; playing = true
-        tick = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { [weak self] _ in
+        let update = Timer(timeInterval: 0.035, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.playing else { return }
                 self.position = max(0, audio.currentTime - start)
@@ -70,8 +86,102 @@ final class LoopPlayer: ObservableObject {
                 }
             }
         }
+        tick = update
+        RunLoop.main.add(update, forMode: .common)
     }
     func stop() { tick?.invalidate(); tick = nil; player?.stop(); player = nil; playing = false; position = 0 }
+}
+
+private struct WritingTransport: View {
+    @ObservedObject var player: LoopPlayer
+    let beat: Beat
+    let folder: URL
+    let start: Double
+    let length: Double
+    @Binding var looping: Bool
+    let play: () -> Void
+    let fragment: () -> Void
+    let settings: () -> Void
+    let replace: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: replace) {
+                HStack {
+                    Text(beat.displayName).font(.headline).lineLimit(1)
+                    Spacer()
+                    Image(systemName: "arrow.triangle.2.circlepath").font(.caption)
+                }
+            }.buttonStyle(.plain).accessibilityLabel("Заменить бит · " + beat.name)
+            if !beat.musicalDetails.isEmpty {
+                Text(beat.musicalDetails).font(.caption).foregroundStyle(.secondary)
+            }
+            BeatWave(beat: beat, folder: folder, start: start, length: length,
+                     position: start + player.position).frame(height: 37)
+            HStack(spacing: 8) {
+                Button(action: play) {
+                    Image(systemName: player.playing ? "stop.fill" : "play.fill")
+                        .foregroundStyle(.black).frame(width: 40, height: 40).background(Night.lime, in: Circle())
+                }.accessibilityLabel(player.playing ? "Стоп" : "Слушать бит")
+                Text(Night.time(player.position) + " / " + Night.time(length))
+                    .font(.caption.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+                Button { looping.toggle() } label: {
+                    Image(systemName: "repeat").foregroundStyle(looping ? Night.lime : .gray)
+                }.frame(minWidth: 32, minHeight: 44).accessibilityLabel("Повтор фрагмента")
+                    .accessibilityValue(looping ? "Включён" : "Выключен")
+                Button("Фрагмент", action: fragment).font(.subheadline)
+                Button(action: settings) { Image(systemName: "slider.horizontal.3").frame(width: 36,height: 44) }
+                    .accessibilityLabel("Настройки бита и проекта")
+            }.buttonStyle(.plain)
+        }.padding(12).studioPanel()
+    }
+}
+
+private struct LyricsEditor: UIViewRepresentable {
+    @Binding var lyrics: String
+
+    func makeCoordinator() -> Coordinator { Coordinator(lyrics: $lyrics) }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.delegate = context.coordinator
+        view.font = .preferredFont(forTextStyle: .title3)
+        view.adjustsFontForContentSizeCategory = true
+        view.tintColor = UIColor(Night.lime)
+        view.backgroundColor = .clear
+        view.accessibilityLabel = "Текст для суфлёра"
+        let toolbar = UIToolbar()
+        toolbar.items = [
+            UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
+            UIBarButtonItem(title: "Готово", style: .done, target: context.coordinator,
+                            action: #selector(Coordinator.finishEditing))
+        ]
+        toolbar.sizeToFit()
+        view.inputAccessoryView = toolbar
+        context.coordinator.editor = view
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        context.coordinator.lyrics = $lyrics
+        guard view.text != lyrics, view.markedTextRange == nil else { return }
+        let selection = view.selectedRange
+        let offset = view.contentOffset
+        view.text = lyrics
+        let count = lyrics.utf16.count
+        let start = selection.location == NSNotFound ? count : min(selection.location, count)
+        view.selectedRange = NSRange(location: start, length: min(selection.length, count - start))
+        view.setContentOffset(offset, animated: false)
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var lyrics: Binding<String>
+        weak var editor: UITextView?
+        init(lyrics: Binding<String>) { self.lyrics = lyrics }
+        func textViewDidChange(_ textView: UITextView) { lyrics.wrappedValue = textView.text }
+        @objc func finishEditing() { editor?.resignFirstResponder() }
+    }
 }
 
 private enum Page: String, CaseIterable { case write = "Текст", record = "Запись", mix = "Микс" }
@@ -109,14 +219,15 @@ struct Editor: View {
     @Binding var song: Song
     let folder: URL
     @EnvironmentObject var routes: Routes
-    @StateObject private var loopPlayer = LoopPlayer()
+    @State private var loopPlayer = LoopPlayer()
     @State private var section = Page.write
     @State private var looping = true
     @State private var importer = false
     @State private var selectingFragment = false
     @State private var pickedBeat: URL?
     @State private var sound = false
-    @State private var syncing = false
+    @State private var beatSettings = false
+    @State private var exportOptions = false
     @State private var alignReference = false
     @State private var pendingAlignment = false
     @State private var pass: Pass?
@@ -126,37 +237,36 @@ struct Editor: View {
     @State private var preview: OutputFile?
     @State private var sharing: OutputFile?
     @State private var cache: (Take, URL)?
-    @FocusState private var writing: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 ForEach(Page.allCases, id: \.self) { page in
                     Button { section = page } label: {
-                        Text(page.rawValue).font(.system(.headline, design: .rounded).weight(.black))
+                        Text(page.rawValue).font(.system(.headline, design: .rounded).weight(.bold))
                             .frame(maxWidth: .infinity).padding(.vertical, 10)
                             .foregroundStyle(section == page ? Color.black : .white)
-                            .background(section == page ? Color.yellow : Color.indigo, in: RoundedRectangle(cornerRadius: 12))
-                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.black,lineWidth: 2))
-                            .shadow(color: .black,radius: 0,x: 2,y: 3)
+                            .background(section == page ? Night.lime : Night.panel, in: RoundedRectangle(cornerRadius: 12))
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.13),lineWidth: 1))
+                            .accessibilityAddTraits(section == page ? .isSelected : [])
                     }.buttonStyle(.plain)
                 }
             }.padding(10)
-            Form {
-                switch section {
-                case .write: writingPanel
-                case .record: recordPanel
-                case .mix: mixPanel
-                }
+            switch section {
+            case .write: writingPanel
+            case .record: recordPanel
+            case .mix: mixPanel
             }
         }
+        .background(Night.canvas)
         .navigationTitle(song.title).navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbarBackground(Night.canvas, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { loopPlayer.stop(); sound = true } label: { Image(systemName: "headphones") }
                     .accessibilityLabel("Настройки звука")
             }
-            ToolbarItemGroup(placement: .keyboard) { Spacer(); Button("Готово") { writing = false } }
         }
         .disabled(busy != nil)
         .navigationBarBackButtonHidden(busy != nil)
@@ -201,147 +311,218 @@ struct Editor: View {
             get: { error != nil || info != nil }, set: { if !$0 { error = nil; info = nil } })) {
             Button("ОК") { error = nil; info = nil }
         } message: { Text(error ?? info ?? "") }
-        .onChange(of: section) { _, _ in loopPlayer.stop(); writing = false }
+        .onChange(of: section) { _, _ in loopPlayer.stop() }
         .onChange(of: song.start) { _, _ in loopPlayer.stop() }
         .onChange(of: song.target) { _, _ in loopPlayer.stop() }
         .onChange(of: looping) { _, _ in loopPlayer.stop() }
         .onDisappear { loopPlayer.stop() }
     }
 
-    @ViewBuilder private var writingPanel: some View {
-        Section("Проект") { TextField("Название", text: $song.title) }
-        Section("Бит") {
-            Button { loopPlayer.stop(); importer = true } label: {
-                Label(song.beat?.name ?? "Загрузить из Файлов", systemImage: "waveform.badge.plus")
-            }
+    private var writingPanel: some View {
+        VStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Текст куплета").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                LyricsEditor(lyrics: $song.lyrics).frame(maxHeight: .infinity)
+            }.padding(14).studioPanel(highlight: true)
             if let beat = song.beat {
-                Button("Выбрать фрагмент на волне") { loopPlayer.stop(); selectingFragment = true }
-                    .sheet(isPresented: $selectingFragment) {
-                        FragmentEditor(beat: beat, url: folder.appendingPathComponent(beat.file),
-                                       start: song.start, length: song.length) { start, length in
-                            song.start = start
-                            song.target = length
-                        }
-                    }
-                TextField("Тональность · например, Фа минор",text: Binding(get: { song.beat?.keyName ?? "" },set: { song.beat?.keyName = $0 }))
-                    .task(id: beat.file) {
-                        guard beat.analyzed != true,
-                              let analyzed = try? await GridAnalysis.read(beat, url: folder.appendingPathComponent(beat.file)),
-                              !Task.isCancelled, song.beat?.file == beat.file else { return }
-                        if song.beat?.bpm == nil { song.beat?.bpm = analyzed.bpm }
-                        if song.beat?.anchor == nil { song.beat?.anchor = analyzed.anchor }
-                        if song.beat?.keyName == nil { song.beat?.keyName = analyzed.keyName }
-                        song.beat?.analyzed = true
-                    }
-                Stepper(beat.bpm.map { String(format: "%.1f BPM", $0) } ?? "Задать темп",
-                        value: Binding(get: { song.beat?.bpm ?? 100 }, set: { song.beat?.bpm = $0 }), in: 60...200, step: 1)
-                if let bpm = beat.bpm {
-                    HStack {
-                        Button("×½") { song.beat?.bpm = max(60,bpm/2) }
-                        Button("×2") { song.beat?.bpm = min(200,bpm*2) }
-                    }.buttonStyle(.borderless)
-                    Button("Здесь раз · начало фрагмента") { song.beat?.anchor = song.start }
-                    Toggle("Метроном при записи", isOn: Binding(get: { song.metronome ?? false }, set: { song.metronome = $0 }))
+                WritingTransport(player: loopPlayer, beat: beat, folder: folder, start: song.start,
+                                 length: song.length, looping: $looping, play: { playBeat(beat) },
+                                 fragment: { loopPlayer.stop(); selectingFragment = true },
+                                 settings: { beatSettings = true }, replace: { loopPlayer.stop(); importer = true })
+            } else {
+                HStack {
+                    Button { importer = true } label: { Label("Загрузить бит", systemImage: "waveform.badge.plus") }
+                        .buttonStyle(StudioAction())
+                    Button { beatSettings = true } label: { Image(systemName: "slider.horizontal.3").frame(width: 44,height: 44) }
+                        .accessibilityLabel("Настройки проекта")
                 }
-                Toggle("Повтор фрагмента", isOn: $looping)
-                Button {
-                    if loopPlayer.playing { loopPlayer.stop(); return }
-                    do {
-                        try routes.activate()
-                        try loopPlayer.start(folder.appendingPathComponent(beat.file),
-                                             from: song.start, length: song.length, loop: looping)
-                    } catch { self.error = error.localizedDescription }
-                } label: {
-                    Label(loopPlayer.playing ? "Стоп · \(Int(loopPlayer.position)) с" : "Слушать · \(Int(song.length)) с",
-                          systemImage: loopPlayer.playing ? "stop.fill" : "play.fill")
+            }
+        }.padding(.horizontal, 12).padding(.bottom, 8)
+        .sheet(isPresented: $selectingFragment) {
+            if let beat = song.beat {
+                FragmentEditor(beat: beat, url: folder.appendingPathComponent(beat.file),
+                               start: song.start, length: song.length) { start, length in
+                    song.start = start
+                    song.target = length
                 }
             }
         }
-        Section("Текст куплета") {
-            TextEditor(text: $song.lyrics).font(.title3).frame(minHeight: 210).focused($writing)
-                .accessibilityLabel("Текст для суфлёра")
+        .sheet(isPresented: $beatSettings) {
+            NavigationStack {
+                Form {
+                    Section("Проект") { TextField("Название", text: $song.title) }
+                    if let beat = song.beat { beatControls(beat) }
+                }.navigationTitle("Настройки").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { Button("Готово") { beatSettings = false } }
+            }
+        }
+        .task(id: song.beat?.file) {
+            guard let beat = song.beat, beat.analyzed != true,
+                  let result = try? await GridAnalysis.read(beat, url: folder.appendingPathComponent(beat.file)),
+                  !Task.isCancelled, song.beat?.file == beat.file else { return }
+            if song.beat?.bpm == nil { song.beat?.bpm = result.bpm }
+            if song.beat?.anchor == nil { song.beat?.anchor = result.anchor }
+            if song.beat?.keyName == nil { song.beat?.keyName = result.keyName }
+            song.beat?.analyzed = true
         }
     }
-    @ViewBuilder private var recordPanel: some View {
-        Section("Суфлёр") {
-            Stepper("Шрифт · \(Int(song.font)) пт", value: $song.font, in: 16...48, step: 1)
-            Stepper("Прокрутка · \(Int(song.speed)) пт/с", value: $song.speed, in: 0...100, step: 2)
-            Stepper("Отступ сверху · \(Int(song.promptY)) пт", value: $song.promptY, in: 0...120, step: 4)
+
+    private func playBeat(_ beat: Beat) {
+        if loopPlayer.playing { loopPlayer.stop(); return }
+        do {
+            try routes.activate()
+            try loopPlayer.start(folder.appendingPathComponent(beat.file), from: song.start,
+                                 length: song.length, loop: looping)
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func beatControls(_ beat: Beat) -> some View {
+        Section(beat.name) {
+            TextField("Тональность · например, Фа минор",text: Binding(get: { song.beat?.keyName ?? "" },set: { song.beat?.keyName = $0 }))
+            Stepper(beat.bpm.map { String(format: "%.1f BPM", $0) } ?? "Задать темп",
+                    value: Binding(get: { song.beat?.bpm ?? 100 }, set: { song.beat?.bpm = $0 }), in: 60...200, step: 1)
+            if let bpm = beat.bpm {
+                HStack {
+                    Button("×½") { song.beat?.bpm = max(60,bpm/2) }
+                    Button("×2") { song.beat?.bpm = min(200,bpm*2) }
+                }.buttonStyle(.borderless)
+                Button("Здесь раз · начало фрагмента") { song.beat?.anchor = song.start }
+                Toggle("Метроном при записи", isOn: Binding(get: { song.metronome ?? false }, set: { song.metronome = $0 }))
+            }
         }
-        Section("Опорная строка") {
-            Text("Включи вывод на динамик в настройках звука. Прочитай первую строку вместе с битом, затем верни наушники для основного дубля.")
-            Button(song.guide == nil ? "Записать опорную строку" : "Перезаписать опорную строку") {
-                loopPlayer.stop(); writing = false
-                pass = Pass(lane: .lead,song: song,folder: folder,reference: true)
-            }.disabled(song.beat == nil)
-        }
-        Section("Селфи и основной голос") {
-            Button { openPass(.lead) } label: { Label("Снять новый дубль", systemImage: "video.fill") }
-                .disabled(song.beat == nil)
-            if song.beat == nil { Text("Сначала добавь бит на вкладке «Текст».").font(.footnote) }
-        }
-        takePicker
-        if let take = song.current {
-            Section("Бэки выбранного дубля") {
-                ForEach([Lane.back1, .back2]) { lane in
-                    Button { openPass(lane) } label: {
-                        Label((take.source(lane) == nil ? "Записать · " : "Перезаписать · ") + lane.title, systemImage: "mic.fill")
+    }
+    private var recordPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                takePicker
+                VStack(spacing: 12) {
+                    Image(systemName: "video").font(.title).foregroundStyle(Night.lime)
+                    Text("Основной дубль").font(.title2.bold())
+                    Button("Снять новый дубль") { openPass(.lead) }
+                        .buttonStyle(StudioAction()).disabled(song.beat == nil).opacity(song.beat == nil ? 0.5 : 1)
+                    if song.beat == nil { Text("Сначала добавь бит на вкладке «Текст».").font(.footnote) }
+                }.padding(16).studioPanel(highlight: true)
+                DisclosureGroup {
+                    Stepper("Шрифт · \(Int(song.font)) пт", value: $song.font, in: 16...48, step: 1)
+                    Stepper("Прокрутка · \(Int(song.speed)) пт/с", value: $song.speed, in: 0...100, step: 2)
+                    Stepper("Отступ сверху · \(Int(song.promptY)) пт", value: $song.promptY, in: 0...120, step: 4)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Суфлёр").font(.headline)
+                        Text("\(Int(song.font)) пт · \(Int(song.speed)) пт/с · \(Int(song.promptY)) пт")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
+                }.padding(14).studioPanel()
+                DisclosureGroup("Опорная строка") {
+                    Text("Включи вывод на динамик в настройках звука. Прочитай первую строку с битом и верни наушники для основного дубля.")
+                        .font(.subheadline).padding(.vertical, 6)
+                    Button(song.guide == nil ? "Записать опорную строку" : "Перезаписать опорную строку") {
+                        loopPlayer.stop()
+                        pass = Pass(lane: .lead, song: song, folder: folder, reference: true)
+                    }.disabled(song.beat == nil)
+                }.padding(14).studioPanel()
+                if let take = song.current {
+                    Text("Вокальные дорожки").font(.headline).padding(.top, 4)
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())]) {
+                        ForEach(Lane.overdubs) { lane in
+                            Button { openPass(lane) } label: {
+                                HStack {
+                                    Image(systemName: take.source(lane) == nil ? "mic" : "mic.fill")
+                                        .foregroundStyle(Night.lime)
+                                    Text(lane.title)
+                                    Spacer()
+                                    if take.source(lane) != nil { Image(systemName: "checkmark").font(.caption) }
+                                }.padding(12).frame(minHeight: 48).studioPanel()
+                            }.buttonStyle(.plain)
+                                .accessibilityLabel((take.source(lane) == nil ? "Записать " : "Перезаписать ") + lane.title)
+                        }
+                    }
+                    DisclosureGroup {
+                        extraVideoButtons(take)
+                    } label: {
+                        HStack {
+                            Label("Доп. видео для монтажа", systemImage: "video.on.rectangle")
+                            Spacer()
+                            Text("\(take.extraVideos?.count ?? 0)/4").monospacedDigit().foregroundStyle(.secondary)
+                        }
+                    }.padding(14).studioPanel()
+                }
+            }.padding(.horizontal, 12).padding(.bottom)
+        }
+    }
+
+    @ViewBuilder private func extraVideoButtons(_ take: Take) -> some View {
+        ForEach(Take.extraVideoSlots, id: \.self) { slot in
+            if let video = take.extraVideos?[slot] {
+                Menu("Доп. видео \(slot + 1)") {
+                    Button("Посмотреть") { preview = OutputFile(url: folder.appendingPathComponent(video.file)) }
+                    Button("Переснять") { openPass(.lead, extraSlot: slot) }
+                    Button("Убрать из дубля", role: .destructive) {
+                        if let index = song.takes.firstIndex(where: { $0.id == take.id }) {
+                            song.takes[index].extraVideos?.removeValue(forKey: slot)
+                        }
+                    }
+                }
+            } else {
+                Button { openPass(.lead, extraSlot: slot) } label: {
+                    Label("Снять доп. видео \(slot + 1)", systemImage: "video.badge.plus")
                 }
             }
         }
     }
     @ViewBuilder private var takePicker: some View {
         if !song.takes.isEmpty {
-            Section {
-                Picker("Дубль", selection: $song.selected) {
+            HStack {
+                Text("Дубль").font(.headline)
+                Spacer()
+                Picker("Основной дубль", selection: $song.selected) {
                     ForEach(Array(song.takes.enumerated()), id: \.element.id) { entry in
-                        Text("№ \(entry.offset + 1) · \(Int(entry.element.duration.rounded())) с")
+                        Text("№ \(entry.offset + 1) · \(Night.time(entry.element.duration))")
                             .tag(Optional(entry.element.id))
                     }
-                }
+                }.pickerStyle(.menu)
+            }.padding(.horizontal, 12).frame(minHeight: 46).studioPanel()
+        }
+    }
+    private var mixPanel: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    takePicker
+                    if let index = song.takes.firstIndex(where: { $0.id == song.selected }) {
+                        let take = song.takes[index]
+                        StudioMixer(take: $song.takes[index], folder: folder,
+                                    pausePlayback: busy != nil || alignReference || preview != nil ||
+                                        sharing != nil || sound || exportOptions)
+                            .id(take.id)
+                        if let guide = song.guide, guide.beatFile == take.beat.file,
+                           abs(guide.beatStart - take.beatStart) < 0.001 {
+                            Button("Выровнять по опорной строке") { alignReference = true }
+                                .padding(.vertical, 6)
+                        }
+                    } else {
+                        ContentUnavailableView("Пока нет дублей", systemImage: "waveform",
+                                               description: Text("Запиши основной дубль на вкладке «Запись»."))
+                    }
+                }.padding(.horizontal, 12).padding(.bottom, 8)
+            }
+            if song.current != nil {
+                Button { exportOptions = true } label: { Label("Экспорт", systemImage: "square.and.arrow.up") }
+                    .buttonStyle(StudioAction()).padding(.horizontal, 12).padding(.vertical, 6)
+                    .confirmationDialog("Результат", isPresented: $exportOptions, titleVisibility: .visible) {
+                        Button("Посмотреть и послушать") { deliver(.preview) }
+                        Button("Сохранить видео в Фото") { deliver(.photos) }
+                        Button("Поделиться видео") { deliver(.shareMovie) }
+                        Button("Stems · экспорт ZIP") { deliver(.stems) }
+                        Button("Отмена", role: .cancel) {}
+                    }
             }
         }
     }
-    @ViewBuilder private var mixPanel: some View {
-        takePicker
-        if let index = song.takes.firstIndex(where: { $0.id == song.selected }) {
-            if let guide = song.guide, guide.beatFile == song.takes[index].beat.file,
-               abs(guide.beatStart-song.takes[index].beatStart) < 0.001 {
-                Button("Выровнять по опорной строке") { alignReference = true }
 
-            }
-            Button("Дорожки · подгонка и предпросмотр") { syncing = true }
-                .sheet(isPresented: $syncing) {
-                    TimelineEditor(take: song.takes[index], folder: folder) { edited in
-                        if let i = song.takes.firstIndex(where: { $0.id == edited.id }) { song.takes[i] = edited }
-                    }
-                }
-            ForEach(Lane.allCases) { lane in
-                let settings = Binding<Strip>(get: { song.takes[index].strips[lane] ?? Strip(gain: 1) },
-                                              set: { song.takes[index].strips[lane] = $0 })
-                ChannelStrip(lane: lane, strip: settings, recorded: song.takes[index].source(lane) != nil)
-            }
-            MixTools(take: $song.takes[index], folder: folder)
-            Section("Изображение") {
-                Picker("Фильтр", selection: $song.takes[index].look) {
-                    ForEach(Look.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-            }
-            Section("Результат") {
-                Button("Посмотреть и послушать") { deliver(.preview) }
-                Button("Сохранить видео в Фото") { deliver(.photos) }
-                Button("Поделиться видео") { deliver(.shareMovie) }
-                Button { deliver(.stems) } label: { Label("Stems · экспорт ZIP", systemImage: "archivebox") }
-                Text("Видео, четыре обработанные дорожки, Master.wav и Acapella.wav с общим началом.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-        } else { Text("Запиши основной дубль, чтобы открыть микшер.") }
-    }
-
-    private func openPass(_ lane: Lane) {
-        loopPlayer.stop(); writing = false
-        pass = Pass(lane: lane, song: song, folder: folder)
+    private func openPass(_ lane: Lane, extraSlot: Int? = nil) {
+        loopPlayer.stop()
+        pass = Pass(lane: lane, song: song, folder: folder, extraSlot: extraSlot)
     }
     private func accept(_ recording: Recording, seconds: Double, job: Pass) {
         if job.reference, let beat = job.song.beat {
@@ -352,9 +533,13 @@ struct Editor: View {
             song.takes.append(take); song.selected = take.id
             if let guide = song.guide, guide.beatFile == beat.file, abs(guide.beatStart-job.song.start) < 0.001 { pendingAlignment = true }
         } else if let i = song.takes.firstIndex(where: { $0.id == job.song.selected }) {
-            song.takes[i].strips[job.lane]?.shiftMS = -(recording.routeDelayMS ?? 0)
-            if job.lane == .back1 { song.takes[i].back1 = recording }
-            if job.lane == .back2 { song.takes[i].back2 = recording }
+            if let slot = job.extraSlot {
+                var videos = song.takes[i].extraVideos ?? [:]
+                videos[slot] = recording
+                song.takes[i].extraVideos = videos
+            } else {
+                song.takes[i].saveOverdub(recording, on: job.lane)
+            }
         }
     }
     @MainActor private func importBeat(_ url: URL) async {
@@ -506,7 +691,7 @@ struct FragmentEditor: View {
                             let mid = size.height / 2
                             let l = width * left / beat.duration
                             let r = width * right / beat.duration
-                            context.fill(Path(CGRect(x: l, y: 0, width: r-l, height: size.height)), with: .color(.mint.opacity(0.22)))
+                            context.fill(Path(CGRect(x: l, y: 0, width: r-l, height: size.height)), with: .color(Night.lime.opacity(0.22)))
                             var path = Path()
                             for (i, peak) in peaks.enumerated() {
                                 let x = width * CGFloat(i) / CGFloat(peaks.count)
@@ -514,7 +699,7 @@ struct FragmentEditor: View {
                                 path.move(to: CGPoint(x: x, y: mid-h))
                                 path.addLine(to: CGPoint(x: x, y: mid+h))
                             }
-                            context.stroke(path, with: .color(.mint))
+                            context.stroke(path, with: .color(Night.lime))
                             for t in [left, right, min(beat.duration, cursor + sound.position)] {
                                 context.fill(Path(CGRect(x: width*t/beat.duration, y: 0, width: 2, height: size.height)), with: .color(.primary))
                             }
@@ -547,7 +732,7 @@ struct FragmentEditor: View {
         }.onDisappear { sound.stop() }
     }
     private func fragmentHandle(start: Bool,width: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 5).fill(start ? Color.mint : Color.orange)
+        RoundedRectangle(cornerRadius: 5).fill(start ? Night.lime : Color.orange)
             .frame(width: 24,height: 92)
             .overlay(Image(systemName: "line.3.horizontal").rotationEffect(.degrees(90)).foregroundStyle(.black))
             .offset(x: max(0,min(width-24,width*(start ? left : right)/beat.duration-12)))
@@ -639,7 +824,7 @@ struct MixTools: View {
                         path.move(to: CGPoint(x: x,y: center-height))
                         path.addLine(to: CGPoint(x: x,y: center+height))
                     }
-                    ctx.stroke(path,with: .color(.mint))
+                    ctx.stroke(path,with: .color(Night.lime))
                     for cut in (take.cuts ?? []) + [BeatCut(start: from,end: min(take.duration,from+length))] {
                         let rect = CGRect(x: cut.start/take.duration*size.width,y: 0,
                                           width: max(0,cut.end-cut.start)/take.duration*size.width,height: size.height)

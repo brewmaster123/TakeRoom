@@ -9,7 +9,8 @@ enum StudioError: LocalizedError {
 }
 
 enum Lane: String, CaseIterable, Codable, Identifiable {
-    case beat, lead, back1, back2
+    case beat, lead, back1, back2, double1, double2
+    static let overdubs: [Lane] = [.double1, .double2, .back1, .back2]
     var id: Self { self }
     var title: String {
         switch self {
@@ -17,6 +18,15 @@ enum Lane: String, CaseIterable, Codable, Identifiable {
         case .lead: return "Основной голос"
         case .back1: return "Бэк 1"
         case .back2: return "Бэк 2"
+        case .double1: return "Дабл 1"
+        case .double2: return "Дабл 2"
+        }
+    }
+    var defaultStrip: Strip {
+        switch self {
+        case .beat: return Strip(gain: 0.65)
+        case .lead: return Strip(gain: 1)
+        default: return Strip(gain: 0.45)
         }
     }
     var wav: String {
@@ -25,6 +35,8 @@ enum Lane: String, CaseIterable, Codable, Identifiable {
         case .lead: return "02-lead.wav"
         case .back1: return "03-back-1.wav"
         case .back2: return "04-back-2.wav"
+        case .double1: return "05-double-1.wav"
+        case .double2: return "06-double-2.wav"
         }
     }
 }
@@ -80,12 +92,26 @@ struct Take: Identifiable, Codable, Equatable {
     var duration: Double
     var back1: Recording?
     var back2: Recording?
+    var double1: Recording?
+    var double2: Recording?
+    var extraVideos: [Int: Recording]?
+    static let extraVideoSlots = 0..<4
     var duck: Double?
     var density: Double?
     var cuts: [BeatCut]?
     var look = Look.natural
-    var strips = [Lane.beat: Strip(gain: 0.65), .lead: Strip(gain: 1),
-                  .back1: Strip(gain: 0.45), .back2: Strip(gain: 0.45)]
+    var strips = Dictionary(uniqueKeysWithValues: Lane.allCases.map { ($0, $0.defaultStrip) })
+
+    mutating func saveOverdub(_ recording: Recording, on lane: Lane) {
+        switch lane {
+        case .back1: back1 = recording
+        case .back2: back2 = recording
+        case .double1: double1 = recording
+        case .double2: double2 = recording
+        case .beat, .lead: return
+        }
+        strips[lane, default: lane.defaultStrip].shiftMS = -(recording.routeDelayMS ?? 0)
+    }
 
     func source(_ lane: Lane) -> Recording? {
         switch lane {
@@ -93,6 +119,8 @@ struct Take: Identifiable, Codable, Equatable {
         case .lead: return video
         case .back1: return back1
         case .back2: return back2
+        case .double1: return double1
+        case .double2: return double2
         }
     }
 }

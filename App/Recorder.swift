@@ -8,7 +8,13 @@ struct Pass: Identifiable {
     let song: Song
     let folder: URL
     var reference = false
-    var main: Bool { lane == .lead && !reference }
+    var extraSlot: Int?
+    var main: Bool { lane == .lead && !reference && extraSlot == nil }
+    var usesCamera: Bool { main || extraSlot != nil }
+    var title: String {
+        if let extraSlot { return "Доп. видео \(extraSlot + 1)" }
+        return reference ? "Опорная строка" : lane.title
+    }
     var limit: Double { (reference || main) ? song.length : song.current?.duration ?? 0 }
 }
 
@@ -39,7 +45,7 @@ final class Recorder: ObservableObject {
 
     init(_ pass: Pass) {
         self.pass = pass
-        file = pass.folder.appendingPathComponent(UUID().uuidString + (pass.main ? ".mov" : ".caf"))
+        file = pass.folder.appendingPathComponent(UUID().uuidString + (pass.usesCamera ? ".mov" : ".caf"))
     }
     func prepare(routes: Routes, finish: @escaping (Recording, Double) -> Void) async {
         self.finish = finish
@@ -48,7 +54,7 @@ final class Recorder: ObservableObject {
             guard await AVCaptureDevice.requestAccess(for: .audio) else {
                 throw StudioError.message("Разреши доступ к микрофону в настройках iPhone.")
             }
-            if pass.main {
+            if pass.usesCamera {
                 guard await AVCaptureDevice.requestAccess(for: .video) else {
                     throw StudioError.message("Разреши доступ к камере в настройках iPhone.")
                 }
@@ -56,7 +62,10 @@ final class Recorder: ObservableObject {
             guard active, !Task.isCancelled else { return }
             try routes.activate()
             let url: URL
-            if pass.main, let beat = pass.song.beat {
+            if pass.usesCamera {
+                guard let beat = pass.extraSlot == nil ? pass.song.beat : pass.song.current?.beat else {
+                    throw StudioError.message("Выбери бит.")
+                }
                 try await camera.prepare()
                 guard active, !Task.isCancelled else { camera.shutdown(); return }
                 url = pass.folder.appendingPathComponent(beat.file)
@@ -84,9 +93,10 @@ final class Recorder: ObservableObject {
             } else { throw StudioError.message("Сначала выбери бит и запиши основной дубль.") }
             let player = try AVAudioPlayer(contentsOf: url)
             guard player.prepareToPlay() else { throw StudioError.message("Не удалось подготовить дорожки.") }
-            player.currentTime = (pass.main || pass.reference) ? pass.song.start : 0
-            player.volume = (pass.main || pass.reference) ? 0.65 : 1
-            if pass.song.metronome == true && !pass.reference {
+            player.currentTime = pass.extraSlot != nil ? (pass.song.current?.beatStart ?? 0) :
+                ((pass.main || pass.reference) ? pass.song.start : 0)
+            player.volume = (pass.usesCamera || pass.reference) ? 0.65 : 1
+            if pass.song.metronome == true && !pass.reference && pass.extraSlot == nil {
                 let beat = pass.main ? pass.song.beat : pass.song.current?.beat
                 if let beat, let bpm = beat.bpm, bpm > 0 {
                     let start = pass.main ? pass.song.start : pass.song.current?.beatStart ?? 0
@@ -97,9 +107,11 @@ final class Recorder: ObservableObject {
             monitor = player
             routes.refresh()
             phase = .ready
-            timer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
+            let update = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.tick() }
             }
+            timer = update
+            RunLoop.main.add(update, forMode: .common)
         } catch { fail(error) }
     }
     func start() {
@@ -114,7 +126,7 @@ final class Recorder: ObservableObject {
             phase = .starting
             startedWith = routeIDs()
             routeDelayMS = UserDefaults.standard.integer(forKey: "AcousticDelay:" + startedWith.joined(separator: "|"))
-            if pass.main { camera.start(file) }
+            if pass.usesCamera { camera.start(file) }
             else if mic != nil { beginPlayback() }
             else { fail(StudioError.message("Микрофон не начал запись.")) }
         }
@@ -128,7 +140,7 @@ final class Recorder: ObservableObject {
         let leadIn = 0.35
         let now = monitor.deviceCurrentTime
         let start = now + leadIn
-        if pass.main {
+        if pass.usesCamera {
             let elapsed = camera.output.recordedDuration.seconds
             guard elapsed.isFinite else { fail(StudioError.message("Камера не вернула время записи.")); camera.stopRecording(); return }
             origin = max(0, elapsed) + leadIn
@@ -163,7 +175,7 @@ final class Recorder: ObservableObject {
         }
     }
     private func tick() {
-        if pass.main {
+        if pass.usesCamera {
             let db = camera.output.connection(with: .audio)?.audioChannels.first?.averagePowerLevel ?? -160
             level = max(0, min(1, (Double(db) + 54) / 54))
         } else {
@@ -181,7 +193,7 @@ final class Recorder: ObservableObject {
         phase = .saving
         click?.stop()
         monitor?.stop()
-        if pass.main { camera.stopRecording() }
+        if pass.usesCamera { camera.stopRecording() }
         else { mic?.stop(); Task { await complete(nil) } }
     }
     private func complete(_ error: Error?) async {
@@ -193,11 +205,11 @@ final class Recorder: ObservableObject {
         do {
             if let error { throw error }
             let asset = AVURLAsset(url: file)
-            let kind: AVMediaType = pass.main ? .video : .audio
+            let kind: AVMediaType = pass.usesCamera ? .video : .audio
             guard let track = try await asset.loadTracks(withMediaType: kind).first else {
                 throw StudioError.message("В записи отсутствует нужная дорожка.")
             }
-            if pass.main, try await asset.loadTracks(withMediaType: .audio).isEmpty {
+            if pass.usesCamera, try await asset.loadTracks(withMediaType: .audio).isEmpty {
                 throw StudioError.message("В видео отсутствует звук микрофона.")
             }
             let range = try await track.load(.timeRange)
@@ -228,11 +240,15 @@ struct Prompt: View {
     let font: Double
     let speed: Double
     let canPosition: Bool
-    @State private var manual: CGFloat = 0
-    @GestureState private var drag: CGFloat = 0
+    @State private var offsetAtResume: CGFloat = 0
+    @State private var resumedAt = 0.0
+    @GestureState private var dragOffset: CGFloat? = nil
+    @State private var gestureBase: CGFloat?
     @State private var textHeight: CGFloat = 0
     var body: some View {
         GeometryReader { geo in
+            let limit = max(0, textHeight - geo.size.height)
+            let movingOffset = min(limit, max(0, offsetAtResume + CGFloat((seconds - resumedAt) * speed)))
             Text(lyrics)
                 .font(.system(size: CGFloat(font), weight: .semibold))
                 .lineSpacing(4).foregroundStyle(.white)
@@ -242,14 +258,25 @@ struct Prompt: View {
                     Color.clear.onAppear { textHeight = size.size.height }
                         .onChange(of: size.size.height) { _, new in textHeight = new }
                 })
-                .offset(y: -min(max(0, manual - drag + CGFloat(seconds * speed)), max(0, textHeight - geo.size.height)))
+                .offset(y: -(dragOffset ?? movingOffset))
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                 .contentShape(Rectangle())
-                .gesture(DragGesture().updating($drag) { value, state, _ in
-                    if canPosition { state = value.translation.height }
+                .gesture(DragGesture(coordinateSpace: .global).onChanged { _ in
+                    guard canPosition else { return }
+                    if gestureBase == nil { gestureBase = movingOffset }
+                }.updating($dragOffset) { value, state, _ in
+                    guard canPosition else { return }
+                    state = min(limit, max(0, (gestureBase ?? movingOffset) - value.translation.height))
                 }.onEnded { value in
-                    if canPosition { manual = min(max(0, manual - value.translation.height), max(0, textHeight - geo.size.height)) }
+                    if canPosition, let base = gestureBase {
+                        offsetAtResume = min(limit, max(0, base - value.translation.height))
+                        resumedAt = seconds
+                    }
+                    gestureBase = nil
                 })
+                .onChange(of: dragOffset != nil) { _, active in
+                    if !active { gestureBase = nil }
+                }
         }
         .padding(8).frame(maxHeight: .infinity)
         .background(.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 14)).clipped()
@@ -270,12 +297,12 @@ struct CaptureScreen: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if pass.main && recorder.phase != .loading {
+            if pass.usesCamera && recorder.phase != .loading {
                 LiveLens(session: recorder.camera.session).ignoresSafeArea()
             }
             VStack(spacing: 12) {
                 if !pass.song.lyrics.isEmpty {
-                    Prompt(lyrics: pass.song.lyrics, seconds: recorder.promptSeconds, font: pass.song.font, speed: pass.song.speed, canPosition: recorder.phase == .ready)
+                    Prompt(lyrics: pass.song.lyrics, seconds: recorder.promptSeconds, font: pass.song.font, speed: pass.song.speed, canPosition: recorder.phase == .ready || recorder.phase == .live)
                         .padding(.top, pass.song.promptY)
                 }
                 if pass.song.lyrics.isEmpty { Spacer() }
@@ -283,7 +310,7 @@ struct CaptureScreen: View {
                     Text("\(n)").font(.system(size: 80, weight: .bold, design: .rounded))
                 }
                 VStack(spacing: 10) {
-                    Text(pass.reference ? "Опорная строка" : pass.lane.title).font(.headline)
+                    Text(pass.title).font(.headline)
                     Text("Вход · \(routes.inputName)\nВыход · \(routes.outputName)")
                         .font(.caption).multilineTextAlignment(.center)
                     ProgressView(value: recorder.level).tint(.green).accessibilityLabel("Уровень микрофона")

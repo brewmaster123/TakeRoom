@@ -18,10 +18,17 @@ enum RenderSmoke {
         let beat = Beat(file: "pulse.mov", name: "Pulse", duration: 2)
         var take = Take(video: source, beat: beat, beatStart: 0.20, duration: 1)
         take.back1 = source
+        take.double1 = source
+        take.double2 = source
+        take.extraVideos = [1: source, 3: source]
         take.look = .mono
         take.strips[.beat]?.shiftMS = -100
         take.strips[.back1]?.shiftMS = 100
         take.strips[.back1]?.gain = 1
+        take.strips[.double1]?.shiftMS = 180
+        take.strips[.double1]?.gain = 1
+        take.strips[.double2]?.shiftMS = -220
+        take.strips[.double2]?.gain = 1
         let zip = try await Render.make(.stems, take: take, folder: work)
         defer { try? fm.removeItem(at: zip) }
         let unzip = Process()
@@ -29,7 +36,7 @@ enum RenderSmoke {
         unzip.arguments = ["-q", zip.path, "-d", work.path]
         try unzip.run(); unzip.waitUntilExit()
         try require(unzip.terminationStatus == 0, "ZIP could not be unpacked")
-        let expected: [Lane:Double] = [.beat:0.30, .lead:0.40, .back1:0.50]
+        let expected: [Lane:Double] = [.beat:0.30, .lead:0.40, .back1:0.50, .double1:0.58, .double2:0.18]
         for lane in Lane.allCases {
             let file = try AVAudioFile(forReading: work.appendingPathComponent(lane.wav))
             try require(file.length == 44100, "\(lane) frame count")
@@ -50,15 +57,35 @@ enum RenderSmoke {
         }
         let json = try JSONEncoder().encode(take)
         var legacy = try JSONSerialization.jsonObject(with: json) as! [String:Any]
-        for field in ["duck","density","cuts"] { legacy.removeValue(forKey: field) }
-        var strips = legacy["strips"] as? [Any] ?? []
+        for field in ["duck","density","cuts","double1","double2","extraVideos"] { legacy.removeValue(forKey: field) }
+        let allStrips = legacy["strips"] as? [Any] ?? []
+        let removedLanes = [Lane.double1.rawValue, Lane.double2.rawValue]
+        var strips: [Any] = []
+        for i in stride(from: 0, to: allStrips.count, by: 2) {
+            if let key = allStrips[i] as? String, !removedLanes.contains(key) {
+                strips += [allStrips[i], allStrips[i + 1]]
+            }
+        }
         // Enum-keyed dictionaries use an alternating key/value array in Codable.
         for i in strips.indices where i % 2 == 1 {
             if var value = strips[i] as? [String:Any] { value.removeValue(forKey: "effects"); strips[i] = value }
         }
         legacy["strips"] = strips
-        let oldTake = try JSONDecoder().decode(Take.self,from: JSONSerialization.data(withJSONObject: legacy))
+        var oldTake = try JSONDecoder().decode(Take.self,from: JSONSerialization.data(withJSONObject: legacy))
         try require(oldTake.video.file == take.video.file,"Legacy project did not decode")
+        try require(oldTake.extraVideos == nil && oldTake.source(.double1) == nil, "Unexpected media in a legacy take")
+        var newOverdub = source
+        newOverdub.routeDelayMS = 125
+        oldTake.saveOverdub(newOverdub, on: .double1)
+        try require(oldTake.source(.double1) == newOverdub && oldTake.strips[.double1]?.shiftMS == -125,
+                    "Could not record a double on a legacy take")
+        let expectedVideo = try Data(contentsOf: fixture)
+        for slot in [1, 3] {
+            let video = work.appendingPathComponent(String(cString: tr_extra_movie_path(Int32(slot))!))
+            try require(try Data(contentsOf: video) == expectedVideo, "Extra video bytes changed")
+            try require(try await AVURLAsset(url: video).loadTracks(withMediaType: .audio).count == 1,
+                        "Extra video lost its audio")
+        }
         let oldSong: [String:Any] = ["id": UUID().uuidString,"title":"Old song","lyrics":"text",
                                      "start":0,"target":60,"font":27,"speed":32,"promptY":16,"takes":[legacy]]
         let decodedSong = try JSONDecoder().decode(Song.self,from: JSONSerialization.data(withJSONObject: oldSong))
@@ -72,7 +99,7 @@ enum RenderSmoke {
         defer { try? fm.removeItem(at: movie) }
         let mixed = AVURLAsset(url: movie)
         try require(try await mixed.loadTracks(withMediaType: .audio).count == 1, "MP4 is missing mix")
-        print("AVFoundation: MP4, muted video, aligned processed stems and empty backing passed")
+        print("AVFoundation: MP4, muted video, five aligned vocal stems, legacy projects and extra videos passed")
     }
     static func main() async throws { try await run() }
 }

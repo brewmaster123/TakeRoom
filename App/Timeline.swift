@@ -28,11 +28,13 @@ final class TimelinePlayer: ObservableObject {
     private var ticker: Timer?
     private var active = true
     private var duration = 0.0
+    private var appliedLook: Look?
     private var repeating = false
     private var loopStart = 0.0
     private var loopEnd = 0.0
 
     func prepare(_ take: Take, folder: URL) async {
+        active = true
         do {
             duration = take.duration
             let directory = try await Render.previewSources(take, folder: folder)
@@ -67,15 +69,6 @@ final class TimelinePlayer: ObservableObject {
                                       of: original, at: .zero)
             track.preferredTransform = try await original.load(.preferredTransform)
             let item = AVPlayerItem(asset: composition)
-            if take.look != .natural {
-                let look = take.look
-                item.videoComposition = AVVideoComposition(asset: composition) { request in
-                    let image = request.sourceImage
-                    let filtered = look == .mono ? image.applyingFilter("CIPhotoEffectMono")
-                        : image.applyingFilter("CISepiaTone", parameters: [kCIInputIntensityKey: 0.25])
-                    request.finish(with: filtered.cropped(to: image.extent), context: nil)
-                }
-            }
             try Task.checkCancellation()
             guard active else { return }
             video.replaceCurrentItem(with: item)
@@ -90,7 +83,23 @@ final class TimelinePlayer: ObservableObject {
         } catch { if active, !Task.isCancelled { message = error.localizedDescription } }
     }
 
+    private func updateLook(_ look: Look) {
+        guard let item = video.currentItem, appliedLook != look else { return }
+        appliedLook = look
+        guard look != .natural else {
+            item.videoComposition = nil
+            return
+        }
+        item.videoComposition = AVVideoComposition(asset: item.asset) { request in
+            let input = request.sourceImage
+            let output = look == .mono ? input.applyingFilter("CIPhotoEffectMono")
+                : input.applyingFilter("CISepiaTone", parameters: [kCIInputIntensityKey: 0.25])
+            request.finish(with: output.cropped(to: input.extent), context: nil)
+        }
+    }
+
     func update(_ take: Take) {
+        updateLook(take.look)
         guard let audio else { return }
         let effects = Render.effects(take)
         let shifts = Lane.allCases.map { Int64((Double(take.strips[$0]?.shiftMS ?? 0) * Render.rate / 1000).rounded()) }
@@ -127,6 +136,13 @@ final class TimelinePlayer: ObservableObject {
     }
     func close() {
         active = false
+        ready = false
+        playing = false
+        position = 0
+        waves = [:]
+        message = nil
+        appliedLook = nil
+        repeating = false
         ticker?.invalidate(); ticker = nil
         engine.stop()
         video.pause(); video.replaceCurrentItem(with: nil)
@@ -142,20 +158,22 @@ struct TimelineEditor: View {
     let folder: URL
     let save: (Take) -> Void
     @State private var take: Take
-    @StateObject private var player = TimelinePlayer()
+    @ObservedObject var player: TimelinePlayer
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var routes: Routes
     @State private var windowStart = 0.0
     @State private var windowLength = 8.0
-    @State private var selected = Lane.back1
+    @State private var selected: Lane
     @State private var repeatPhrase = false
     @State private var dragStart: Int?
     @State private var history = [[Lane: Strip]]()
 
-    init(take: Take, folder: URL, save: @escaping (Take) -> Void) {
+    init(take: Take, folder: URL, player: TimelinePlayer, selected: Lane, save: @escaping (Take) -> Void) {
         self.folder = folder
+        self.player = player
         self.save = save
         _take = State(initialValue: take)
+        _selected = State(initialValue: selected)
+        _windowLength = State(initialValue: min(8, max(1, take.duration)))
     }
     private var span: Double { min(windowLength, take.duration) }
     private var end: Double { min(take.duration, windowStart + span) }
@@ -184,7 +202,7 @@ struct TimelineEditor: View {
                         .accessibilityLabel("Начало видимого участка")
                     Slider(value: $windowLength, in: min(1,take.duration)...max(1,min(60,take.duration)))
                         .accessibilityLabel("Масштаб волны")
-                    ForEach(Lane.allCases) { lane in waveRow(lane) }
+                    ForEach([Lane.beat, .lead] + Lane.overdubs) { lane in waveRow(lane) }
                     Text("Выбрано · \(selected.title) · \(shift) мс")
                     HStack {
                         Button("Раньше · 5 мс") { move(-5) }
@@ -194,7 +212,7 @@ struct TimelineEditor: View {
                         }.disabled(history.isEmpty)
                     }.buttonStyle(.bordered)
                     if selected == .lead { Text("Сдвиг голоса влияет на совпадение с губами.").font(.footnote) }
-                    ChannelStrip(lane: selected,strip: Binding(get: { take.strips[selected] ?? Strip(gain: 1) },
+                    ChannelStrip(lane: selected,strip: Binding(get: { take.strips[selected] ?? selected.defaultStrip },
                                                                set: { take.strips[selected] = $0 }),recorded: take.source(selected) != nil)
                     MixTools(take: $take,folder: folder,beforeCompare: { player.transport(play: false) })
                     Button("Применить") { save(take); dismiss() }.buttonStyle(.borderedProminent)
@@ -203,16 +221,13 @@ struct TimelineEditor: View {
             .navigationTitle("Дорожки")
             .toolbar { Button("Закрыть") { dismiss() } }
         }
-        .task {
-            do { try routes.activate(); await player.prepare(take, folder: folder) }
-            catch { player.message = error.localizedDescription }
-        }
+        .onAppear { player.update(take) }
         .onChange(of: take) { _, value in player.update(value) }
         .onChange(of: windowStart) { _, _ in refreshLoop() }
         .onChange(of: windowLength) { _, _ in
             windowStart = min(windowStart, max(0,take.duration-span)); refreshLoop()
         }
-        .onDisappear { player.close() }
+        .onDisappear { player.transport(play: false); player.clearLoop() }
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { _ in player.transport(play: false) }
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { _ in player.transport(play: false) }
     }
@@ -221,7 +236,7 @@ struct TimelineEditor: View {
     }
     private func move(_ delta: Int) {
         history.append(take.strips)
-        take.strips[selected, default: Strip(gain: 1)].shiftMS = shift + delta
+        take.strips[selected, default: selected.defaultStrip].shiftMS = shift + delta
     }
     private func waveRow(_ lane: Lane) -> some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -229,7 +244,7 @@ struct TimelineEditor: View {
             GeometryReader { geometry in
                 WaveShape(peaks: player.waves[lane] ?? [], duration: take.duration,
                           start: windowStart, span: span, shift: Double(take.strips[lane]?.shiftMS ?? 0)/1000,
-                          position: player.position, color: lane.color, bpm: take.beat.bpm,
+                          position: player.position, color: selected == lane ? Night.lime : .gray, bpm: take.beat.bpm,
                           anchor: (take.beat.anchor ?? 0)-take.beatStart+Double(take.strips[.beat]?.shiftMS ?? 0)/1000)
                     .contentShape(Rectangle())
                     .onTapGesture { selected = lane }
@@ -237,12 +252,12 @@ struct TimelineEditor: View {
                         selected = lane
                         if dragStart == nil { history.append(take.strips); dragStart = take.strips[lane]?.shiftMS ?? 0 }
                         let delta = Int((value.translation.width/geometry.size.width*span*1000).rounded())
-                        take.strips[lane, default: Strip(gain: 1)].shiftMS = min(Int(take.duration*1000),max(-Int(take.duration*1000),(dragStart ?? 0)+delta))
+                        take.strips[lane, default: lane.defaultStrip].shiftMS = min(Int(take.duration*1000),max(-Int(take.duration*1000),(dragStart ?? 0)+delta))
                     }.onEnded { _ in dragStart = nil })
             }.frame(height: 65)
         }.padding(8)
-            .background(lane.color.opacity(selected == lane ? 0.25 : 0.08), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected == lane ? lane.color : Color.clear,lineWidth: 2))
+            .background(Night.lime.opacity(selected == lane ? 0.10 : 0.015), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected == lane ? Night.lime : Color.clear,lineWidth: 2))
     }
 }
 
@@ -253,7 +268,7 @@ struct WaveShape: View {
     let span: Double
     var shift = 0.0
     var position: Double? = nil
-    var color = Color.mint
+    var color = Night.lime
     var bpm: Double? = nil
     var anchor = 0.0
     var body: some View {
@@ -288,8 +303,158 @@ struct WaveShape: View {
     }
 }
 
-extension Lane {
-    var color: Color {
-        switch self { case .beat: return .yellow; case .lead: return .mint; case .back1: return .pink; case .back2: return .cyan }
+// Compact mixer writes directly to the selected take. The expanded timeline retains
+// its editable draft, undo history, phrase loop and video preview.
+struct StudioMixer: View {
+    @Binding var take: Take
+    let folder: URL
+    let pausePlayback: Bool
+    @State private var expanded = false
+    @EnvironmentObject private var routes: Routes
+    @StateObject private var player = TimelinePlayer()
+    @State private var selected = Lane.lead
+    @State private var looping = false
+    @State private var showProcessing = false
+    @State private var preparationError: String?
+
+    init(take: Binding<Take>, folder: URL, pausePlayback: Bool) {
+        _take = take
+        self.folder = folder
+        self.pausePlayback = pausePlayback
+    }
+
+    private var strip: Binding<Strip> {
+        Binding(get: { take.strips[selected] ?? selected.defaultStrip },
+                set: { take.strips[selected] = $0 })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            timeline
+            HStack(spacing: 16) {
+                Button {
+                    player.transport(to: player.position >= take.duration ? 0 : nil, play: !player.playing)
+                } label: {
+                    Image(systemName: player.playing ? "pause.fill" : "play.fill")
+                        .frame(width: 50, height: 40).foregroundStyle(.black)
+                        .background(Night.lime, in: RoundedRectangle(cornerRadius: 12))
+                }.accessibilityLabel(player.playing ? "Пауза" : "Слушать микс")
+                Text(Night.time(player.position)).monospacedDigit()
+                Button {
+                    looping.toggle()
+                    if looping { player.transport(loop: 0...take.duration) } else { player.clearLoop() }
+                } label: { Image(systemName: "repeat").foregroundStyle(looping ? Night.lime : Color.gray) }
+                    .accessibilityLabel("Повтор дубля")
+                Spacer()
+                Button {
+                    player.transport(play: false)
+                    player.clearLoop()
+                    looping = false
+                    expanded = true
+                } label: {
+                    Label("Дорожки", systemImage: "arrow.up.left.and.arrow.down.right")
+                }.font(.subheadline)
+            }.buttonStyle(.plain).disabled(!player.ready)
+            if let message = preparationError ?? player.message {
+                Text(message).font(.footnote).foregroundStyle(.secondary)
+            } else if !player.ready { ProgressView("Подготовка дорожек…").font(.caption) }
+            inspector
+            Button {
+                player.transport(play: false)
+                showProcessing = true
+            } label: {
+                Label("Обработка, ямы и видео", systemImage: "slider.horizontal.3")
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(14).studioPanel()
+            }.buttonStyle(.plain)
+        }
+        .task {
+            looping = false
+            preparationError = nil
+            do {
+                try routes.activate()
+                await player.prepare(take, folder: folder)
+                player.update(take)
+            } catch { preparationError = error.localizedDescription }
+        }
+        .onChange(of: take) { _, updated in player.update(updated) }
+        .onChange(of: pausePlayback) { _, paused in if paused { player.transport(play: false) } }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { _ in player.transport(play: false) }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { _ in player.transport(play: false) }
+        .onDisappear { player.close() }
+        .sheet(isPresented: $expanded, onDismiss: { player.update(take) }) {
+            TimelineEditor(take: take, folder: folder, player: player, selected: selected) { edited in
+                take = edited
+            }
+        }
+        .sheet(isPresented: $showProcessing) {
+            NavigationStack {
+                Form {
+                    Picker("Дорожка", selection: $selected) {
+                        ForEach([Lane.beat, .lead] + Lane.overdubs) { lane in Text(lane.title).tag(lane) }
+                    }
+                    ChannelStrip(lane: selected, strip: strip, recorded: take.source(selected) != nil)
+                    MixTools(take: $take, folder: folder)
+                    Section("Изображение") {
+                        Picker("Фильтр", selection: $take.look) {
+                            ForEach(Look.allCases, id: \.self) { look in Text(look.rawValue).tag(look) }
+                        }
+                    }
+                }.navigationTitle("Обработка").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { Button("Готово") { showProcessing = false } }
+            }
+        }
+    }
+
+    private var timeline: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Color.clear.frame(width: 62, height: 1)
+                Text("00:00")
+                Spacer()
+                Text(Night.time(take.duration / 2))
+                Spacer()
+                Text(Night.time(take.duration))
+            }.font(.caption2.monospacedDigit()).foregroundStyle(.secondary).padding(.vertical, 6)
+            ForEach([Lane.beat, .lead] + Lane.overdubs) { lane in
+                Button { selected = lane } label: {
+                    HStack(spacing: 6) {
+                        Text(lane == .lead ? "Голос" : lane.title).font(.subheadline.weight(.semibold))
+                            .frame(width: 62, alignment: .leading)
+                        WaveShape(peaks: player.waves[lane] ?? [], duration: take.duration, span: take.duration,
+                                  shift: Double(take.strips[lane]?.shiftMS ?? 0) / 1000, position: player.position,
+                                  color: selected == lane ? Night.lime : .gray)
+                            .clipped()
+                    }.padding(.horizontal, 6).frame(minHeight: 38)
+                        .background(selected == lane ? Night.lime.opacity(0.09) : .clear)
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityAddTraits(selected == lane ? .isSelected : [])
+                Divider()
+            }
+            Slider(value: Binding(get: { player.position }, set: { player.transport(to: $0) }),
+                   in: 0...max(0.01, take.duration)).accessibilityLabel("Позиция микса")
+        }.padding(8).studioPanel()
+    }
+
+    private var inspector: some View {
+        let settings = strip
+        return VStack(alignment: .leading, spacing: 8) {
+            Toggle(selected == .lead ? "Голос" : selected.title, isOn: Binding(
+                get: { !settings.wrappedValue.muted }, set: { settings.wrappedValue.muted = !$0 }
+            )).font(.headline)
+            if take.source(selected) != nil {
+                LabeledContent("Громкость", value: "\(Int((settings.wrappedValue.gain * 100).rounded())) %")
+                Slider(value: settings.gain, in: 0...1).accessibilityLabel("Громкость")
+                Divider()
+                HStack {
+                    Text("Сдвиг").font(.subheadline)
+                    Text("\(settings.wrappedValue.shiftMS) мс").font(.caption.monospacedDigit())
+                    Spacer()
+                    ForEach([-5, 5], id: \.self) { delta in
+                        Button(delta < 0 ? "−5 мс" : "+5 мс") { settings.wrappedValue.shiftMS += delta }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            } else { Text("Пока не записан").font(.subheadline).foregroundStyle(.secondary) }
+        }.padding(14).studioPanel()
     }
 }
