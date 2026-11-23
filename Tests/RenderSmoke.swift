@@ -32,8 +32,9 @@ enum RenderSmoke {
         let zip = try await Render.make(.stems, take: take, folder: work)
         defer { try? fm.removeItem(at: zip) }
         let unzip = Process()
-        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        unzip.arguments = ["-q", zip.path, "-d", work.path]
+        // Use the same Python 3 available to CI and honor the ZIP UTF-8 filename flag.
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        unzip.arguments = ["python3", "-X", "utf8", "-m", "zipfile", "-e", zip.path, work.path]
         try unzip.run(); unzip.waitUntilExit()
         try require(unzip.terminationStatus == 0, "ZIP could not be unpacked")
         let expected: [Lane:Double] = [.beat:0.30, .lead:0.40, .back1:0.50, .double1:0.58, .double2:0.18]

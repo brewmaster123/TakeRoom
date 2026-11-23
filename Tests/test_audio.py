@@ -145,6 +145,11 @@ class AudioTests(unittest.TestCase):
             videos = [name for name in zipped.namelist() if name.endswith(".mov")]
             self.assertEqual(videos, ["Доп. видео для монтажа/02.mov", "Доп. видео для монтажа/04.mov"])
             self.assertEqual(zipped.read(videos[0]), b"original video with audio")
+        output = self.root / "unpacked"
+        subprocess.run([sys.executable, "-X", "utf8", "-m", "zipfile", "-e", str(archive), str(output)],
+                       env={**os.environ, "LC_ALL": "C"}, check=True)
+        for name in ("02.mov", "04.mov"):
+            self.assertEqual((output / extras.name / name).read_bytes(), (extras / name).read_bytes())
         self.assertNotEqual(self.dsp.tr_pack_processed(os.fsencode(self.root), os.fsencode(archive), 0b1111), 0)
         self.assertFalse(archive.exists())
 
